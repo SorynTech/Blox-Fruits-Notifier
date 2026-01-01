@@ -229,26 +229,26 @@ FRUITS_DATA = {
     "Dark": {"rarity": "Uncommon", "color": 0x3b82f6, "emoji": "🌑"},
     "Eagle": {"rarity": "Uncommon", "color": 0x3b82f6, "emoji": "🦅"},
     "Diamond": {"rarity": "Uncommon", "color": 0x3b82f6, "emoji": "💎"},
-    "Light": {"rarity": "Uncommon", "color": 0x3b82f6, "emoji": "💡"},
-    "Rubber": {"rarity": "Uncommon", "color": 0x3b82f6, "emoji": "🎈"},
-    "Ghost": {"rarity": "Uncommon", "color": 0x3b82f6, "emoji": "👻"},
     "Flame": {"rarity": "Uncommon", "color": 0x808080, "emoji": "🔥"},
     
     # Rare (Purple)
     "Magma": {"rarity": "Rare", "color": 0x9333ea, "emoji": "🌋"},
-    "Quake": {"rarity": "Rare", "color": 0x9333ea, "emoji": "⚡"},
-    "Buddha": {"rarity": "Rare", "color": 0x9333ea, "emoji": "🙏"},
-    "Love": {"rarity": "Rare", "color": 0x9333ea, "emoji": "💖"},
-    "Creation": {"rarity": "Rare", "color": 0x9333ea, "emoji": "🎨"},
-    "Spider": {"rarity": "Rare", "color": 0x9333ea, "emoji": "🕷️"},
-    "Sound": {"rarity": "Rare", "color": 0x9333ea, "emoji": "🔊"},
-    "Phoenix": {"rarity": "Rare", "color": 0x9333ea, "emoji": "🔥"},
+    "Light": {"rarity": "Rare", "color": 0x3b82f6, "emoji": "💡"},
+    "Rubber": {"rarity": "Rare", "color": 0x3b82f6, "emoji": "🎈"},
+    "Ghost": {"rarity": "Rare", "color": 0x3b82f6, "emoji": "👻"},
     
     # Legendary (Pink/Magenta)
     "Portal": {"rarity": "Legendary", "color": 0xec4899, "emoji": "🌀"},
     "Lightning": {"rarity": "Legendary", "color": 0xec4899, "emoji": "⚡"},
     "Pain": {"rarity": "Legendary", "color": 0xec4899, "emoji": "💢"},
     "Blizzard": {"rarity": "Legendary", "color": 0xec4899, "emoji": "❄️"},
+    "Quake": {"rarity": "Legendary", "color": 0x9333ea, "emoji": "⚡"},
+    "Buddha": {"rarity": "Legendary", "color": 0x9333ea, "emoji": "🙏"},
+    "Love": {"rarity": "Legendary", "color": 0x9333ea, "emoji": "💖"},
+    "Creation": {"rarity": "Legendary", "color": 0x9333ea, "emoji": "🎨"},
+    "Spider": {"rarity": "Legendary", "color": 0x9333ea, "emoji": "🕷️"},
+    "Sound": {"rarity": "Legendary", "color": 0x9333ea, "emoji": "🔊"},
+    "Phoenix": {"rarity": "Legendary", "color": 0x9333ea, "emoji": "🔥"},
     
     # Mythic (Red)
     "Gravity": {"rarity": "Mythic", "color": 0xdc2626, "emoji": "🌌"},
