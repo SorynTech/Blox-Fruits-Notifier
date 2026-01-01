@@ -221,7 +221,7 @@ FRUITS_DATA = {
     "Bomb": {"rarity": "Common", "color": 0x808080, "emoji": "💣"},
     "Smoke": {"rarity": "Common", "color": 0x808080, "emoji": "💨"},
     "Spike": {"rarity": "Common", "color": 0x808080, "emoji": "🦔"},
-    "Flame": {"rarity": "Common", "color": 0x808080, "emoji": "🔥"},
+    
     
     # Uncommon (Blue)
     "Ice": {"rarity": "Uncommon", "color": 0x3b82f6, "emoji": "🧊"},
@@ -232,6 +232,7 @@ FRUITS_DATA = {
     "Light": {"rarity": "Uncommon", "color": 0x3b82f6, "emoji": "💡"},
     "Rubber": {"rarity": "Uncommon", "color": 0x3b82f6, "emoji": "🎈"},
     "Ghost": {"rarity": "Uncommon", "color": 0x3b82f6, "emoji": "👻"},
+    "Flame": {"rarity": "Uncommon", "color": 0x808080, "emoji": "🔥"},
     
     # Rare (Purple)
     "Magma": {"rarity": "Rare", "color": 0x9333ea, "emoji": "🌋"},
