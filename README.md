@@ -101,16 +101,16 @@ The bot includes two web interfaces:
 The bot includes all current Blox Fruits (41 total) organized by rarity:
 
 ### ⚪ Common (8 fruits)
-Rocket, Spin, Blade, Spring, Bomb, Smoke, Spike, Flame
+Rocket, Spin, Blade, Spring, Bomb, Smoke, Spike, 
 
 ### 🔵 Uncommon (8 fruits)
-Ice, Sand, Dark, Eagle, Diamond, Light, Rubber, Ghost
+Ice, Sand, Dark, Eagle, Diamond,Flame 
 
 ### 🟣 Rare (8 fruits)
-Magma, Quake, Buddha, Love, Creation, Spider, Sound, Phoenix
+Magma, Light, Rubber, Ghost 
 
 ### 🔮 Legendary (4 fruits)
-Portal, Lightning, Pain, Blizzard
+Portal, Lightning, Pain, Blizzard, Quake, Buddha, Love, Creation, Spider, Sound, Phoenix
 
 ### 🔴 Mythic (13 fruits)
 Gravity, Mammoth, T-Rex, Dough, Shadow, Venom, Gas, Spirit, Tiger, Yeti, Kitsune, Control, Dragon
