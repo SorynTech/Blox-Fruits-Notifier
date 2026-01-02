@@ -7,7 +7,9 @@ from aiohttp import web
 import asyncio
 from dotenv import load_dotenv
 import json
-import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from psycopg2.pool import SimpleConnectionPool
 from typing import Optional, List, Dict
 import hashlib
 import secrets
@@ -31,6 +33,16 @@ ROLL_COOLDOWN_HOURS = 2
 STATS_USER = os.getenv('STATS_USER', 'admin')
 STATS_PASS = os.getenv('STATS_PASS', 'changeme')
 
+# Supabase Database Configuration
+SUPABASE_URL = os.getenv('SUPABASE_URL')
+if not SUPABASE_URL:
+    print("ERROR: SUPABASE_URL not found in environment variables!")
+    print("Please add your Supabase connection URL to your environment variables.")
+    exit(1)
+
+# Connection pool for Supabase
+db_pool = None
+
 # Statistics tracking
 stats = {
     'bot_start_time': None,
@@ -40,175 +52,247 @@ stats = {
     'command_usage': {}
 }
 
+def get_db_connection():
+    """Get a database connection from the pool"""
+    return db_pool.getconn()
+
+def return_db_connection(conn):
+    """Return a connection to the pool"""
+    db_pool.putconn(conn)
+
 # Database setup
 def init_database():
-    """Initialize SQLite database with required tables"""
-    conn = sqlite3.connect('fruit_rolls.db')
-    c = conn.cursor()
+    """Initialize PostgreSQL database with required tables"""
+    global db_pool
     
-    # Users table
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        username TEXT NOT NULL,
-        total_rolls INTEGER DEFAULT 0,
-        last_roll_time TIMESTAMP,
-        next_roll_time TIMESTAMP,
-        notifications_enabled INTEGER DEFAULT 1,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )''')
-    
-    # Rolls table
-    c.execute('''CREATE TABLE IF NOT EXISTS rolls (
-        roll_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        fruit_name TEXT NOT NULL,
-        rolled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users (user_id)
-    )''')
-    
-    # Command usage tracking
-    c.execute('''CREATE TABLE IF NOT EXISTS command_usage (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        command_name TEXT NOT NULL,
-        user_id INTEGER NOT NULL,
-        used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )''')
-    
-    conn.commit()
-    conn.close()
+    try:
+        # Create connection pool for Supabase
+        # Using pooled connection (port 6543) for better performance
+        db_pool = SimpleConnectionPool(1, 20, SUPABASE_URL)
+        print("✅ Supabase connection pool created")
+        
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Users table
+        cur.execute('''CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,
+            username TEXT NOT NULL,
+            total_rolls INTEGER DEFAULT 0,
+            last_roll_time TIMESTAMP WITH TIME ZONE,
+            next_roll_time TIMESTAMP WITH TIME ZONE,
+            notifications_enabled BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        )''')
+        
+        # Rolls table
+        cur.execute('''CREATE TABLE IF NOT EXISTS rolls (
+            roll_id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            fruit_name TEXT NOT NULL,
+            rolled_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
+        )''')
+        
+        # Command usage tracking
+        cur.execute('''CREATE TABLE IF NOT EXISTS command_usage (
+            id SERIAL PRIMARY KEY,
+            command_name TEXT NOT NULL,
+            user_id BIGINT NOT NULL,
+            used_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        )''')
+        
+        # Create indexes for better performance
+        cur.execute('''CREATE INDEX IF NOT EXISTS idx_rolls_user_id ON rolls(user_id)''')
+        cur.execute('''CREATE INDEX IF NOT EXISTS idx_rolls_rolled_at ON rolls(rolled_at)''')
+        cur.execute('''CREATE INDEX IF NOT EXISTS idx_command_usage_used_at ON command_usage(used_at)''')
+        cur.execute('''CREATE INDEX IF NOT EXISTS idx_users_next_roll_time ON users(next_roll_time)''')
+        
+        conn.commit()
+        cur.close()
+        return_db_connection(conn)
+        
+        print("✅ Supabase database initialized successfully")
+        print("🦈 Connected to Supabase PostgreSQL")
+        
+    except Exception as e:
+        print(f"❌ Supabase connection error: {e}")
+        print("Make sure your SUPABASE_URL is correct and the database is running.")
+        raise
 
 # Database helper functions
 def get_user(user_id: int) -> Optional[Dict]:
     """Get user from database"""
-    conn = sqlite3.connect('fruit_rolls.db')
-    c = conn.cursor()
-    c.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
-    row = c.fetchone()
-    conn.close()
-    
-    if row:
-        return {
-            'user_id': row[0],
-            'username': row[1],
-            'total_rolls': row[2],
-            'last_roll_time': datetime.fromisoformat(row[3]) if row[3] else None,
-            'next_roll_time': datetime.fromisoformat(row[4]) if row[4] else None,
-            'notifications_enabled': bool(row[5]),
-            'created_at': datetime.fromisoformat(row[6])
-        }
-    return None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute('SELECT * FROM users WHERE user_id = %s', (user_id,))
+        row = cur.fetchone()
+        cur.close()
+        return_db_connection(conn)
+        
+        if row:
+            return dict(row)
+        return None
+    except Exception as e:
+        print(f"Error in get_user: {e}")
+        return None
 
 def create_or_update_user(user_id: int, username: str):
     """Create or update user in database"""
-    conn = sqlite3.connect('fruit_rolls.db')
-    c = conn.cursor()
-    c.execute('''INSERT OR REPLACE INTO users (user_id, username, total_rolls, notifications_enabled)
-                 VALUES (?, ?, COALESCE((SELECT total_rolls FROM users WHERE user_id = ?), 0), 
-                         COALESCE((SELECT notifications_enabled FROM users WHERE user_id = ?), 1))''',
-              (user_id, username, user_id, user_id))
-    conn.commit()
-    conn.close()
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Check if user exists
+        cur.execute('SELECT total_rolls, notifications_enabled FROM users WHERE user_id = %s', (user_id,))
+        existing = cur.fetchone()
+        
+        if existing:
+            # Update username
+            cur.execute('UPDATE users SET username = %s WHERE user_id = %s', (username, user_id))
+        else:
+            # Insert new user
+            cur.execute('''INSERT INTO users (user_id, username, total_rolls, notifications_enabled)
+                         VALUES (%s, %s, 0, TRUE)''', (user_id, username))
+        
+        conn.commit()
+        cur.close()
+        return_db_connection(conn)
+    except Exception as e:
+        print(f"Error in create_or_update_user: {e}")
+        if conn:
+            conn.rollback()
+            return_db_connection(conn)
 
 def log_roll(user_id: int, username: str, fruit_name: str):
     """Log a fruit roll in the database"""
     now = datetime.now(timezone.utc)
     next_roll = now + timedelta(hours=ROLL_COOLDOWN_HOURS)
     
-    conn = sqlite3.connect('fruit_rolls.db')
-    c = conn.cursor()
-    
-    # Update user
-    c.execute('''UPDATE users 
-                 SET total_rolls = total_rolls + 1,
-                     last_roll_time = ?,
-                     next_roll_time = ?,
-                     username = ?
-                 WHERE user_id = ?''',
-              (now.isoformat(), next_roll.isoformat(), username, user_id))
-    
-    # Log the roll
-    c.execute('INSERT INTO rolls (user_id, fruit_name) VALUES (?, ?)',
-              (user_id, fruit_name))
-    
-    conn.commit()
-    conn.close()
-    
-    stats['total_rolls'] += 1
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Update user
+        cur.execute('''UPDATE users 
+                     SET total_rolls = total_rolls + 1,
+                         last_roll_time = %s,
+                         next_roll_time = %s,
+                         username = %s
+                     WHERE user_id = %s''',
+                  (now, next_roll, username, user_id))
+        
+        # Log the roll
+        cur.execute('INSERT INTO rolls (user_id, fruit_name, rolled_at) VALUES (%s, %s, %s)',
+                  (user_id, fruit_name, now))
+        
+        conn.commit()
+        cur.close()
+        return_db_connection(conn)
+        
+        stats['total_rolls'] += 1
+    except Exception as e:
+        print(f"Error in log_roll: {e}")
+        if conn:
+            conn.rollback()
+            return_db_connection(conn)
 
 def get_user_rolls(user_id: int) -> List[Dict]:
     """Get all rolls for a user"""
-    conn = sqlite3.connect('fruit_rolls.db')
-    c = conn.cursor()
-    c.execute('''SELECT fruit_name, rolled_at FROM rolls 
-                 WHERE user_id = ? 
-                 ORDER BY rolled_at DESC''', (user_id,))
-    rows = c.fetchall()
-    conn.close()
-    
-    return [{'fruit': row[0], 'time': datetime.fromisoformat(row[1])} for row in rows]
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute('''SELECT fruit_name, rolled_at FROM rolls 
+                     WHERE user_id = %s 
+                     ORDER BY rolled_at DESC''', (user_id,))
+        rows = cur.fetchall()
+        cur.close()
+        return_db_connection(conn)
+        
+        return [{'fruit': row['fruit_name'], 'time': row['rolled_at']} for row in rows]
+    except Exception as e:
+        print(f"Error in get_user_rolls: {e}")
+        return []
 
 def get_all_users() -> List[Dict]:
     """Get all users from database"""
-    conn = sqlite3.connect('fruit_rolls.db')
-    c = conn.cursor()
-    c.execute('SELECT user_id, username, total_rolls, last_roll_time, next_roll_time, notifications_enabled FROM users')
-    rows = c.fetchall()
-    conn.close()
-    
-    users = []
-    for row in rows:
-        users.append({
-            'user_id': row[0],
-            'username': row[1],
-            'total_rolls': row[2],
-            'last_roll_time': datetime.fromisoformat(row[3]) if row[3] else None,
-            'next_roll_time': datetime.fromisoformat(row[4]) if row[4] else None,
-            'notifications_enabled': bool(row[5])
-        })
-    return users
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute('''SELECT user_id, username, total_rolls, last_roll_time, 
+                            next_roll_time, notifications_enabled 
+                     FROM users''')
+        rows = cur.fetchall()
+        cur.close()
+        return_db_connection(conn)
+        
+        return [dict(row) for row in rows]
+    except Exception as e:
+        print(f"Error in get_all_users: {e}")
+        return []
 
 def toggle_notifications(user_id: int, enabled: bool):
     """Toggle notifications for a user"""
-    conn = sqlite3.connect('fruit_rolls.db')
-    c = conn.cursor()
-    c.execute('UPDATE users SET notifications_enabled = ? WHERE user_id = ?',
-              (1 if enabled else 0, user_id))
-    conn.commit()
-    conn.close()
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('UPDATE users SET notifications_enabled = %s WHERE user_id = %s',
+                  (enabled, user_id))
+        conn.commit()
+        cur.close()
+        return_db_connection(conn)
+    except Exception as e:
+        print(f"Error in toggle_notifications: {e}")
+        if conn:
+            conn.rollback()
+            return_db_connection(conn)
 
 def log_command_usage(command_name: str, user_id: int):
     """Log command usage for statistics"""
-    conn = sqlite3.connect('fruit_rolls.db')
-    c = conn.cursor()
-    c.execute('INSERT INTO command_usage (command_name, user_id) VALUES (?, ?)',
-              (command_name, user_id))
-    conn.commit()
-    conn.close()
-    
-    if command_name not in stats['command_usage']:
-        stats['command_usage'][command_name] = 0
-    stats['command_usage'][command_name] += 1
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('INSERT INTO command_usage (command_name, user_id) VALUES (%s, %s)',
+                  (command_name, user_id))
+        conn.commit()
+        cur.close()
+        return_db_connection(conn)
+        
+        if command_name not in stats['command_usage']:
+            stats['command_usage'][command_name] = 0
+        stats['command_usage'][command_name] += 1
+    except Exception as e:
+        print(f"Error in log_command_usage: {e}")
+        if conn:
+            conn.rollback()
+            return_db_connection(conn)
 
 def get_command_usage_stats() -> Dict:
     """Get command usage statistics"""
-    conn = sqlite3.connect('fruit_rolls.db')
-    c = conn.cursor()
-    
-    # Get usage by hour for last 24 hours
-    c.execute('''SELECT 
-                    strftime('%H', used_at) as hour,
-                    COUNT(*) as count
-                 FROM command_usage
-                 WHERE used_at >= datetime('now', '-24 hours')
-                 GROUP BY hour
-                 ORDER BY hour''')
-    
-    hourly_data = {}
-    for row in c.fetchall():
-        hourly_data[row[0]] = row[1]
-    
-    conn.close()
-    return hourly_data
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Get usage by hour for last 24 hours
+        cur.execute('''SELECT 
+                        EXTRACT(HOUR FROM used_at) as hour,
+                        COUNT(*) as count
+                     FROM command_usage
+                     WHERE used_at >= NOW() - INTERVAL '24 hours'
+                     GROUP BY EXTRACT(HOUR FROM used_at)
+                     ORDER BY hour''')
+        
+        hourly_data = {}
+        for row in cur.fetchall():
+            hourly_data[str(int(row[0])).zfill(2)] = row[1]
+        
+        cur.close()
+        return_db_connection(conn)
+        return hourly_data
+    except Exception as e:
+        print(f"Error in get_command_usage_stats: {e}")
+        return {}
 
 # Fruit list with rarities (Blox Fruits)
 # Rarity: Common (gray), Uncommon (blue), Rare (purple), Legendary (pink), Mythic (red)
@@ -653,12 +737,16 @@ async def notification_checker():
                 await channel.send(content=f"<@{user_data['user_id']}>", embed=embed)
                 
                 # Clear next_roll_time so we don't spam
-                conn = sqlite3.connect('fruit_rolls.db')
-                c = conn.cursor()
-                c.execute('UPDATE users SET next_roll_time = NULL WHERE user_id = ?',
-                         (user_data['user_id'],))
-                conn.commit()
-                conn.close()
+                try:
+                    conn = get_db_connection()
+                    cur = conn.cursor()
+                    cur.execute('UPDATE users SET next_roll_time = NULL WHERE user_id = %s',
+                             (user_data['user_id'],))
+                    conn.commit()
+                    cur.close()
+                    return_db_connection(conn)
+                except Exception as e:
+                    print(f"Error updating next_roll_time: {e}")
                 
                 print(f"✅ Sent roll reminder to {user_data['username']} in channel")
             except Exception as e:
@@ -681,7 +769,7 @@ async def fruit_roll(interaction: discord.Interaction):
         user_data = get_user(interaction.user.id)
     
     # Check if user can roll (cooldown)
-    if user_data['next_roll_time']:
+    if user_data and user_data['next_roll_time']:
         now = datetime.now(timezone.utc)
         if user_data['next_roll_time'] > now:
             time_left = user_data['next_roll_time'] - now
@@ -939,6 +1027,9 @@ HEALTH_PAGE = """
             <p>Total Rolls: {total_rolls}</p>
             <p>Active Users: {active_users}</p>
         </div>
+        <div class="supabase-badge">
+            <p>🗄️ Powered by Supabase</p>
+        </div>
     </div>
 </body>
 </html>
@@ -1137,6 +1228,7 @@ STATS_PAGE = """
         <div class="header">
             <h1>🦈 SorynTech Bot Suite</h1>
             <p style="font-size: 1.2em; color: #06b6d4;">🎲 Blox Fruits Roll Tracker</p>
+            <div class="supabase-badge">🗄️ Powered by Supabase</div>
         </div>
         
         <div class="stats-grid">
@@ -1178,8 +1270,8 @@ STATS_PAGE = """
         </div>
         
         <div class="footer">
-            <p>🦈 SorynTech Bot Suite | Auto-refresh every 30 seconds</p>
-            <p style="margin-top: 10px; font-size: 0.9em;">Last Updated: {current_time}</p>
+            <p>🦈 SorynTech Bot Suite | 🗄️ Supabase PostgreSQL</p>
+            <p style="margin-top: 10px; font-size: 0.9em;">Auto-refresh every 30 seconds | Last Updated: {current_time}</p>
         </div>
     </div>
     
@@ -1367,3 +1459,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\n👋 Bot shutting down...")
+    finally:
+        if db_pool:
+            db_pool.closeall()
+            print("✅ Supabase connections closed")
