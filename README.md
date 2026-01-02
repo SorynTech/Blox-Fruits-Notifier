@@ -370,7 +370,7 @@ This bot is part of the **SorynTech Bot Suite**, a collection of Discord bots wi
 #### 🦈 Shark Moderation Bot
 A comprehensive Discord moderation bot with powerful features and the same beautiful underwater theme.
 
-**Repository**: [github.com/SorynTech/Discord-Moderation-Bot](https://github.com/SorynTech/Discord-Moderation-Bot)
+**Repository**: [github.com/SorynTech/Discord-Moderation-Bot](https://github.com/SorynTech/Discord-Moderation-Bot-)
 
 **Features:**
 - 33+ moderation commands
