@@ -944,6 +944,8 @@ async def stats_link(interaction: discord.Interaction):
     embed.add_field(name="Username", value=f"`{STATS_USER}`", inline=False)
     embed.add_field(name="Password", value=f"`{STATS_PASS}`", inline=False)
     embed.add_field(name="URL", value="Go to `/stats` on your bot URL", inline=False)
+    embed.add_field(name="LINK:",value="https://blox-fruits-notifier-msvi.onrender.com/stats", inline=False)
+
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
