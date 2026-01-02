@@ -1,12 +1,4 @@
-# Discord Bot Dependencies
 discord.py>=2.3.2
-aiohttp>=3.9.0
-
-# Environment Variables
 python-dotenv>=1.0.0
-
-# Database (included in Python standard library)
-# sqlite3 - No installation needed
-
-# Additional utilities
-asyncio>=3.4.3
+aiohttp>=3.9.0
+psycopg2-binary>=2.9.9
