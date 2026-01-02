@@ -11,8 +11,6 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import SimpleConnectionPool
 from typing import Optional, List, Dict
-import hashlib
-import secrets
 
 # Load environment variables from .env file
 load_dotenv()
@@ -28,7 +26,7 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 # Configuration
 OWNER_ID = 447812883158532106
 NOTIFICATION_USERS = [447812883158532106, 778645525499084840, 581677161006497824, 1285269152474464369]
-NOTIFICATION_CHANNEL_ID = 1431308135091671132  # General channel for notifications
+NOTIFICATION_CHANNEL_ID = 1431308135091671132
 ROLL_COOLDOWN_HOURS = 2
 STATS_USER = os.getenv('STATS_USER', 'admin')
 STATS_PASS = os.getenv('STATS_PASS', 'changeme')
@@ -62,12 +60,11 @@ def return_db_connection(conn):
 
 # Database setup
 def init_database():
-    """Initialize PostgreSQL database with required tables"""
+    """Initialize Supabase database with required tables"""
     global db_pool
     
     try:
         # Create connection pool for Supabase
-        # Using pooled connection (port 6543) for better performance
         db_pool = SimpleConnectionPool(1, 20, SUPABASE_URL)
         print("✅ Supabase connection pool created")
         
@@ -85,11 +82,12 @@ def init_database():
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         )''')
         
-        # Rolls table
+        # Rolls table - NOW INCLUDES RARITY
         cur.execute('''CREATE TABLE IF NOT EXISTS rolls (
             roll_id SERIAL PRIMARY KEY,
             user_id BIGINT NOT NULL,
             fruit_name TEXT NOT NULL,
+            fruit_rarity TEXT NOT NULL,
             rolled_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users (user_id)
         )''')
@@ -105,6 +103,7 @@ def init_database():
         # Create indexes for better performance
         cur.execute('''CREATE INDEX IF NOT EXISTS idx_rolls_user_id ON rolls(user_id)''')
         cur.execute('''CREATE INDEX IF NOT EXISTS idx_rolls_rolled_at ON rolls(rolled_at)''')
+        cur.execute('''CREATE INDEX IF NOT EXISTS idx_rolls_rarity ON rolls(fruit_rarity)''')
         cur.execute('''CREATE INDEX IF NOT EXISTS idx_command_usage_used_at ON command_usage(used_at)''')
         cur.execute('''CREATE INDEX IF NOT EXISTS idx_users_next_roll_time ON users(next_roll_time)''')
         
@@ -170,6 +169,9 @@ def log_roll(user_id: int, username: str, fruit_name: str):
     now = datetime.now(timezone.utc)
     next_roll = now + timedelta(hours=ROLL_COOLDOWN_HOURS)
     
+    # Get fruit rarity
+    fruit_rarity = FRUITS_DATA.get(fruit_name, {}).get('rarity', 'Unknown')
+    
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -183,9 +185,9 @@ def log_roll(user_id: int, username: str, fruit_name: str):
                      WHERE user_id = %s''',
                   (now, next_roll, username, user_id))
         
-        # Log the roll
-        cur.execute('INSERT INTO rolls (user_id, fruit_name, rolled_at) VALUES (%s, %s, %s)',
-                  (user_id, fruit_name, now))
+        # Log the roll WITH RARITY
+        cur.execute('INSERT INTO rolls (user_id, fruit_name, fruit_rarity, rolled_at) VALUES (%s, %s, %s, %s)',
+                  (user_id, fruit_name, fruit_rarity, now))
         
         conn.commit()
         cur.close()
@@ -268,34 +270,40 @@ def log_command_usage(command_name: str, user_id: int):
             conn.rollback()
             return_db_connection(conn)
 
-def get_command_usage_stats() -> Dict:
-    """Get command usage statistics"""
+def get_rarity_distribution() -> Dict:
+    """Get distribution of fruit rarities rolled"""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # Get usage by hour for last 24 hours
+        # Get count of rolls by rarity
         cur.execute('''SELECT 
-                        EXTRACT(HOUR FROM used_at) as hour,
+                        fruit_rarity,
                         COUNT(*) as count
-                     FROM command_usage
-                     WHERE used_at >= NOW() - INTERVAL '24 hours'
-                     GROUP BY EXTRACT(HOUR FROM used_at)
-                     ORDER BY hour''')
+                     FROM rolls
+                     GROUP BY fruit_rarity
+                     ORDER BY 
+                        CASE fruit_rarity
+                            WHEN 'Common' THEN 1
+                            WHEN 'Uncommon' THEN 2
+                            WHEN 'Rare' THEN 3
+                            WHEN 'Legendary' THEN 4
+                            WHEN 'Mythic' THEN 5
+                            ELSE 6
+                        END''')
         
-        hourly_data = {}
+        rarity_data = {}
         for row in cur.fetchall():
-            hourly_data[str(int(row[0])).zfill(2)] = row[1]
+            rarity_data[row[0]] = row[1]
         
         cur.close()
         return_db_connection(conn)
-        return hourly_data
+        return rarity_data
     except Exception as e:
-        print(f"Error in get_command_usage_stats: {e}")
+        print(f"Error in get_rarity_distribution: {e}")
         return {}
 
 # Fruit list with rarities (Blox Fruits)
-# Rarity: Common (gray), Uncommon (blue), Rare (purple), Legendary (pink), Mythic (red)
 FRUITS_DATA = {
     # Common (Gray)
     "Rocket": {"rarity": "Common", "color": 0x808080, "emoji": "🚀"},
@@ -305,7 +313,6 @@ FRUITS_DATA = {
     "Bomb": {"rarity": "Common", "color": 0x808080, "emoji": "💣"},
     "Smoke": {"rarity": "Common", "color": 0x808080, "emoji": "💨"},
     "Spike": {"rarity": "Common", "color": 0x808080, "emoji": "🦔"},
-    
     
     # Uncommon (Blue)
     "Ice": {"rarity": "Uncommon", "color": 0x3b82f6, "emoji": "🧊"},
@@ -1016,6 +1023,13 @@ HEALTH_PAGE = """
             font-size: 1.1em;
             opacity: 0.9;
         }}
+        .supabase-badge {{
+            margin-top: 20px;
+            padding: 10px 20px;
+            background: rgba(59, 130, 246, 0.2);
+            border-radius: 10px;
+            display: inline-block;
+        }}
     </style>
 </head>
 <body>
@@ -1116,6 +1130,14 @@ STATS_PAGE = """
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
         }}
+        .supabase-badge {{
+            display: inline-block;
+            margin-top: 10px;
+            padding: 8px 16px;
+            background: rgba(59, 130, 246, 0.2);
+            border-radius: 15px;
+            font-size: 0.9em;
+        }}
         .stats-grid {{
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
@@ -1167,7 +1189,7 @@ STATS_PAGE = """
         }}
         .chart-container {{
             position: relative;
-            height: 300px;
+            height: 400px;
         }}
         .users-section {{
             background: rgba(13, 58, 92, 0.4);
@@ -1258,9 +1280,9 @@ STATS_PAGE = """
         </div>
         
         <div class="chart-section">
-            <div class="chart-title">📈 /fruit-roll Command Usage (24h)</div>
+            <div class="chart-title">🍎 Fruit Rarity Distribution</div>
             <div class="chart-container">
-                <canvas id="usageChart"></canvas>
+                <canvas id="rarityChart"></canvas>
             </div>
         </div>
         
@@ -1276,21 +1298,19 @@ STATS_PAGE = """
     </div>
     
     <script>
-        const usageData = {usage_data};
+        const rarityData = {rarity_data};
         
-        const ctx = document.getElementById('usageChart').getContext('2d');
+        const ctx = document.getElementById('rarityChart').getContext('2d');
         new Chart(ctx, {{
-            type: 'line',
+            type: 'bar',
             data: {{
-                labels: usageData.labels,
+                labels: rarityData.labels,
                 datasets: [{{
-                    label: 'Command Uses',
-                    data: usageData.data,
-                    borderColor: '#06b6d4',
-                    backgroundColor: 'rgba(6, 182, 212, 0.1)',
-                    borderWidth: 3,
-                    fill: true,
-                    tension: 0.4
+                    label: 'Number of Rolls',
+                    data: rarityData.data,
+                    backgroundColor: rarityData.colors,
+                    borderColor: rarityData.borderColors,
+                    borderWidth: 2
                 }}]
             }},
             options: {{
@@ -1298,9 +1318,18 @@ STATS_PAGE = """
                 maintainAspectRatio: false,
                 plugins: {{
                     legend: {{
-                        labels: {{
-                            color: '#94a3b8',
-                            font: {{ size: 14 }}
+                        display: false
+                    }},
+                    tooltip: {{
+                        callbacks: {{
+                            label: function(context) {{
+                                let label = context.dataset.label || '';
+                                if (label) {{
+                                    label += ': ';
+                                }}
+                                label += context.parsed.y + ' rolls';
+                                return label;
+                            }}
                         }}
                     }}
                 }},
@@ -1308,11 +1337,17 @@ STATS_PAGE = """
                     y: {{
                         beginAtZero: true,
                         grid: {{ color: 'rgba(59, 130, 246, 0.1)' }},
-                        ticks: {{ color: '#94a3b8' }}
+                        ticks: {{ 
+                            color: '#94a3b8',
+                            stepSize: 1
+                        }}
                     }},
                     x: {{
-                        grid: {{ color: 'rgba(59, 130, 246, 0.1)' }},
-                        ticks: {{ color: '#94a3b8' }}
+                        grid: {{ display: false }},
+                        ticks: {{ 
+                            color: '#94a3b8',
+                            font: {{ size: 14, weight: 'bold' }}
+                        }}
                     }}
                 }}
             }}
@@ -1392,19 +1427,49 @@ async def handle_stats(request):
     if not users_html:
         users_html = "<p style='text-align: center; opacity: 0.7;'>No users have logged rolls yet</p>"
     
-    # Get command usage data
-    usage_stats = get_command_usage_stats()
+    # Get rarity distribution data
+    rarity_dist = get_rarity_distribution()
+    
+    # Define rarity order and colors
+    rarity_order = ['Common', 'Uncommon', 'Rare', 'Legendary', 'Mythic']
+    rarity_colors_hex = {
+        'Common': 'rgba(128, 128, 128, 0.8)',
+        'Uncommon': 'rgba(59, 130, 246, 0.8)',
+        'Rare': 'rgba(147, 51, 234, 0.8)',
+        'Legendary': 'rgba(236, 72, 153, 0.8)',
+        'Mythic': 'rgba(220, 38, 38, 0.8)'
+    }
+    rarity_border_colors = {
+        'Common': 'rgba(128, 128, 128, 1)',
+        'Uncommon': 'rgba(59, 130, 246, 1)',
+        'Rare': 'rgba(147, 51, 234, 1)',
+        'Legendary': 'rgba(236, 72, 153, 1)',
+        'Mythic': 'rgba(220, 38, 38, 1)'
+    }
+    rarity_emoji = {
+        'Common': '⚪',
+        'Uncommon': '🔵',
+        'Rare': '🟣',
+        'Legendary': '🔮',
+        'Mythic': '🔴'
+    }
+    
     labels = []
     data = []
+    colors = []
+    border_colors = []
     
-    for hour in range(24):
-        hour_str = f"{hour:02d}"
-        labels.append(f"{hour_str}:00")
-        data.append(usage_stats.get(hour_str, 0))
+    for rarity in rarity_order:
+        labels.append(f"{rarity_emoji.get(rarity, '')} {rarity}")
+        data.append(rarity_dist.get(rarity, 0))
+        colors.append(rarity_colors_hex.get(rarity, 'rgba(128, 128, 128, 0.8)'))
+        border_colors.append(rarity_border_colors.get(rarity, 'rgba(128, 128, 128, 1)'))
     
-    usage_data = {
+    rarity_data = {
         'labels': labels,
-        'data': data
+        'data': data,
+        'colors': colors,
+        'borderColors': border_colors
     }
     
     html = STATS_PAGE.format(
@@ -1413,7 +1478,7 @@ async def handle_stats(request):
         active_users=len(users),
         guilds_count=stats['guilds_count'],
         users_list=users_html,
-        usage_data=json.dumps(usage_data),
+        rarity_data=json.dumps(rarity_data),
         current_time=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
     )
     
