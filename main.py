@@ -1601,8 +1601,26 @@ async def handle_root(request):
 
 
 async def handle_favicon(request):
-    """Handle favicon requests - return 404 for now"""
-    return web.Response(status=404)
+    """Handle favicon requests"""
+    import os.path
+    favicon_path = os.path.join(os.path.dirname(__file__), 'favicon.ico')
+
+    try:
+        if os.path.exists(favicon_path):
+            with open(favicon_path, 'rb') as f:
+                favicon_data = f.read()
+            return web.Response(
+                body=favicon_data,
+                content_type='image/x-icon',
+                headers={
+                    'Cache-Control': 'public, max-age=86400'  # Cache for 1 day
+                }
+            )
+        else:
+            return web.Response(status=404)
+    except Exception as e:
+        print(f"Error serving favicon: {e}")
+        return web.Response(status=404)
 
 
 async def start_web_server():
