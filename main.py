@@ -11,17 +11,74 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import SimpleConnectionPool
 from typing import Optional, List, Dict
+import logging
+import sys
+
+# ============================================================================
+# LOGGING CONFIGURATION - VERBOSE MODE
+# ============================================================================
+
+# Configure logging with colors and detailed format
+class ColoredFormatter(logging.Formatter):
+    """Custom formatter with colors for console output"""
+    
+    grey = "\x1b[38;21m"
+    blue = "\x1b[38;5;39m"
+    yellow = "\x1b[38;5;226m"
+    red = "\x1b[38;5;196m"
+    bold_red = "\x1b[31;1m"
+    green = "\x1b[38;5;46m"
+    reset = "\x1b[0m"
+    
+    FORMATS = {
+        logging.DEBUG: grey + "%(asctime)s [%(levelname)s] %(name)s: %(message)s" + reset,
+        logging.INFO: blue + "%(asctime)s [%(levelname)s] %(name)s: %(message)s" + reset,
+        logging.WARNING: yellow + "%(asctime)s [%(levelname)s] %(name)s: %(message)s" + reset,
+        logging.ERROR: red + "%(asctime)s [%(levelname)s] %(name)s: %(message)s" + reset,
+        logging.CRITICAL: bold_red + "%(asctime)s [%(levelname)s] %(name)s: %(message)s" + reset,
+    }
+    
+    def format(self, record):
+        log_fmt = self.FORMATS.get(record.levelno)
+        formatter = logging.Formatter(log_fmt, datefmt='%Y-%m-%d %H:%M:%S')
+        return formatter.format(record)
+
+# Set up root logger
+logger = logging.getLogger('BloxFruitsBot')
+logger.setLevel(logging.DEBUG)
+
+# Console handler with colors
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.DEBUG)
+console_handler.setFormatter(ColoredFormatter())
+logger.addHandler(console_handler)
+
+# Discord.py library logging
+discord_logger = logging.getLogger('discord')
+discord_logger.setLevel(logging.INFO)
+discord_handler = logging.StreamHandler(sys.stdout)
+discord_handler.setFormatter(ColoredFormatter())
+discord_logger.addHandler(discord_handler)
+
+logger.info("=" * 80)
+logger.info("🦈 BLOX FRUITS ROLL TRACKER - STARTING UP")
+logger.info("=" * 80)
 
 # Load environment variables from .env file
+logger.info("📂 Loading environment variables...")
 load_dotenv()
+logger.info("✅ Environment variables loaded")
 
 # Bot setup with necessary intents
+logger.info("🤖 Configuring Discord bot intents...")
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
 intents.members = True
+logger.info("✅ Bot intents configured: message_content=True, guilds=True, members=True")
 
 bot = commands.Bot(command_prefix='!', intents=intents)
+logger.info("✅ Bot instance created with prefix '!'")
 
 # Configuration
 OWNER_ID = 447812883158532106
@@ -31,12 +88,21 @@ ROLL_COOLDOWN_HOURS = 2
 STATS_USER = os.getenv('STATS_USER', 'admin')
 STATS_PASS = os.getenv('STATS_PASS', 'changeme')
 
+logger.info(f"⚙️  Configuration loaded:")
+logger.info(f"   - Owner ID: {OWNER_ID}")
+logger.info(f"   - Notification Users: {len(NOTIFICATION_USERS)} users")
+logger.info(f"   - Notification Channel: {NOTIFICATION_CHANNEL_ID}")
+logger.info(f"   - Roll Cooldown: {ROLL_COOLDOWN_HOURS} hours")
+logger.info(f"   - Stats Auth: {STATS_USER}:{'*' * len(STATS_PASS)}")
+
 # Supabase Database Configuration
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 if not SUPABASE_URL:
-    print("ERROR: SUPABASE_URL not found in environment variables!")
-    print("Please add your Supabase connection URL to your environment variables.")
+    logger.critical("❌ SUPABASE_URL not found in environment variables!")
+    logger.critical("Please add your Supabase connection URL to your environment variables.")
     exit(1)
+else:
+    logger.info("✅ Supabase URL found in environment")
 
 # Connection pool for Supabase
 db_pool = None
@@ -50,14 +116,18 @@ stats = {
     'command_usage': {}
 }
 
+logger.info("📊 Statistics tracking initialized")
+
 
 def get_db_connection():
     """Get a database connection from the pool"""
+    logger.debug("🔌 Acquiring database connection from pool...")
     return db_pool.getconn()
 
 
 def return_db_connection(conn):
     """Return a connection to the pool"""
+    logger.debug("🔌 Returning database connection to pool...")
     db_pool.putconn(conn)
 
 
@@ -65,16 +135,24 @@ def return_db_connection(conn):
 def init_database():
     """Initialize Supabase database with required tables"""
     global db_pool
+    
+    logger.info("=" * 80)
+    logger.info("🗄️  INITIALIZING DATABASE")
+    logger.info("=" * 80)
 
     try:
         # Create connection pool for Supabase
+        logger.info("🔄 Creating Supabase connection pool...")
         db_pool = SimpleConnectionPool(1, 20, SUPABASE_URL)
-        print("✅ Supabase connection pool created")
+        logger.info("✅ Supabase connection pool created (min=1, max=20)")
 
+        logger.info("🔌 Testing database connection...")
         conn = get_db_connection()
         cur = conn.cursor()
+        logger.info("✅ Database connection successful")
 
         # Users table
+        logger.info("📋 Creating 'users' table if not exists...")
         cur.execute('''CREATE TABLE IF NOT EXISTS users
                        (
                            user_id
@@ -111,8 +189,10 @@ def init_database():
                            DEFAULT
                            CURRENT_TIMESTAMP
                        )''')
+        logger.info("✅ 'users' table ready")
 
         # Rolls table - NOW INCLUDES RARITY
+        logger.info("📋 Creating 'rolls' table if not exists...")
         cur.execute('''CREATE TABLE IF NOT EXISTS rolls
         (
             roll_id
@@ -147,8 +227,10 @@ def init_database():
                            user_id
                        )
             )''')
+        logger.info("✅ 'rolls' table ready")
 
         # Command usage tracking
+        logger.info("📋 Creating 'command_usage' table if not exists...")
         cur.execute('''CREATE TABLE IF NOT EXISTS command_usage
                        (
                            id
@@ -171,24 +253,30 @@ def init_database():
                            DEFAULT
                            CURRENT_TIMESTAMP
                        )''')
+        logger.info("✅ 'command_usage' table ready")
 
         # Create indexes for better performance
+        logger.info("📊 Creating database indexes...")
         cur.execute('''CREATE INDEX IF NOT EXISTS idx_rolls_user_id ON rolls(user_id)''')
         cur.execute('''CREATE INDEX IF NOT EXISTS idx_rolls_rolled_at ON rolls(rolled_at)''')
         cur.execute('''CREATE INDEX IF NOT EXISTS idx_rolls_rarity ON rolls(fruit_rarity)''')
         cur.execute('''CREATE INDEX IF NOT EXISTS idx_command_usage_used_at ON command_usage(used_at)''')
         cur.execute('''CREATE INDEX IF NOT EXISTS idx_users_next_roll_time ON users(next_roll_time)''')
+        logger.info("✅ All indexes created")
 
         conn.commit()
+        logger.info("✅ Database changes committed")
         cur.close()
         return_db_connection(conn)
 
-        print("✅ Supabase database initialized successfully")
-        print("🦈 Connected to Supabase PostgreSQL")
+        logger.info("=" * 80)
+        logger.info("✅ SUPABASE DATABASE INITIALIZED SUCCESSFULLY")
+        logger.info("🦈 Connected to Supabase PostgreSQL")
+        logger.info("=" * 80)
 
     except Exception as e:
-        print(f"❌ Supabase connection error: {e}")
-        print("Make sure your SUPABASE_URL is correct and the database is running.")
+        logger.critical(f"❌ Supabase connection error: {e}")
+        logger.critical("Make sure your SUPABASE_URL is correct and the database is running.")
         raise
 
 
@@ -196,6 +284,7 @@ def init_database():
 def get_user(user_id: int) -> Optional[Dict]:
     """Get user from database"""
     try:
+        logger.debug(f"👤 Fetching user data for ID: {user_id}")
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute('SELECT * FROM users WHERE user_id = %s', (user_id,))
@@ -204,16 +293,19 @@ def get_user(user_id: int) -> Optional[Dict]:
         return_db_connection(conn)
 
         if row:
+            logger.debug(f"✅ User found: {dict(row).get('username')}")
             return dict(row)
+        logger.debug(f"⚠️  User not found: {user_id}")
         return None
     except Exception as e:
-        print(f"Error in get_user: {e}")
+        logger.error(f"❌ Error in get_user: {e}")
         return None
 
 
 def create_or_update_user(user_id: int, username: str):
     """Create or update user in database"""
     try:
+        logger.info(f"👤 Creating/updating user: {username} (ID: {user_id})")
         conn = get_db_connection()
         cur = conn.cursor()
 
@@ -222,18 +314,19 @@ def create_or_update_user(user_id: int, username: str):
         existing = cur.fetchone()
 
         if existing:
-            # Update username
+            logger.debug(f"📝 Updating existing user: {username}")
             cur.execute('UPDATE users SET username = %s WHERE user_id = %s', (username, user_id))
         else:
-            # Insert new user
+            logger.info(f"✨ Creating new user: {username}")
             cur.execute('''INSERT INTO users (user_id, username, total_rolls, notifications_enabled)
                            VALUES (%s, %s, 0, TRUE)''', (user_id, username))
 
         conn.commit()
         cur.close()
         return_db_connection(conn)
+        logger.debug(f"✅ User operation complete: {username}")
     except Exception as e:
-        print(f"Error in create_or_update_user: {e}")
+        logger.error(f"❌ Error in create_or_update_user: {e}")
         if conn:
             conn.rollback()
             return_db_connection(conn)
@@ -246,12 +339,15 @@ def log_roll(user_id: int, username: str, fruit_name: str):
 
     # Get fruit rarity
     fruit_rarity = FRUITS_DATA.get(fruit_name, {}).get('rarity', 'Unknown')
+    
+    logger.info(f"🎲 Logging roll: {username} -> {fruit_name} ({fruit_rarity})")
 
     try:
         conn = get_db_connection()
         cur = conn.cursor()
 
         # Update user
+        logger.debug(f"📝 Updating user stats for {username}")
         cur.execute('''UPDATE users
                        SET total_rolls    = total_rolls + 1,
                            last_roll_time = %s,
@@ -261,6 +357,7 @@ def log_roll(user_id: int, username: str, fruit_name: str):
                     (now, next_roll, username, user_id))
 
         # Log the roll WITH RARITY
+        logger.debug(f"📝 Inserting roll record")
         cur.execute('INSERT INTO rolls (user_id, fruit_name, fruit_rarity, rolled_at) VALUES (%s, %s, %s, %s)',
                     (user_id, fruit_name, fruit_rarity, now))
 
@@ -269,8 +366,10 @@ def log_roll(user_id: int, username: str, fruit_name: str):
         return_db_connection(conn)
 
         stats['total_rolls'] += 1
+        logger.info(f"✅ Roll logged successfully! Total rolls: {stats['total_rolls']}")
+        logger.info(f"⏰ Next roll for {username}: {next_roll.strftime('%Y-%m-%d %H:%M:%S UTC')}")
     except Exception as e:
-        print(f"Error in log_roll: {e}")
+        logger.error(f"❌ Error in log_roll: {e}")
         if conn:
             conn.rollback()
             return_db_connection(conn)
@@ -279,6 +378,7 @@ def log_roll(user_id: int, username: str, fruit_name: str):
 def get_user_rolls(user_id: int) -> List[Dict]:
     """Get all rolls for a user"""
     try:
+        logger.debug(f"📊 Fetching roll history for user ID: {user_id}")
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute('''SELECT fruit_name, rolled_at
@@ -289,15 +389,17 @@ def get_user_rolls(user_id: int) -> List[Dict]:
         cur.close()
         return_db_connection(conn)
 
+        logger.debug(f"✅ Found {len(rows)} rolls for user")
         return [{'fruit': row['fruit_name'], 'time': row['rolled_at']} for row in rows]
     except Exception as e:
-        print(f"Error in get_user_rolls: {e}")
+        logger.error(f"❌ Error in get_user_rolls: {e}")
         return []
 
 
 def get_all_users() -> List[Dict]:
     """Get all users from database"""
     try:
+        logger.debug("👥 Fetching all users from database")
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute('''SELECT user_id,
@@ -311,15 +413,18 @@ def get_all_users() -> List[Dict]:
         cur.close()
         return_db_connection(conn)
 
+        logger.debug(f"✅ Fetched {len(rows)} users")
         return [dict(row) for row in rows]
     except Exception as e:
-        print(f"Error in get_all_users: {e}")
+        logger.error(f"❌ Error in get_all_users: {e}")
         return []
 
 
 def toggle_notifications(user_id: int, enabled: bool):
     """Toggle notifications for a user"""
     try:
+        status = "ENABLED" if enabled else "DISABLED"
+        logger.info(f"🔔 Setting notifications {status} for user ID: {user_id}")
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute('UPDATE users SET notifications_enabled = %s WHERE user_id = %s',
@@ -327,8 +432,9 @@ def toggle_notifications(user_id: int, enabled: bool):
         conn.commit()
         cur.close()
         return_db_connection(conn)
+        logger.debug(f"✅ Notifications toggled successfully")
     except Exception as e:
-        print(f"Error in toggle_notifications: {e}")
+        logger.error(f"❌ Error in toggle_notifications: {e}")
         if conn:
             conn.rollback()
             return_db_connection(conn)
@@ -337,6 +443,7 @@ def toggle_notifications(user_id: int, enabled: bool):
 def log_command_usage(command_name: str, user_id: int):
     """Log command usage for statistics"""
     try:
+        logger.debug(f"📊 Logging command usage: /{command_name} by user {user_id}")
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute('INSERT INTO command_usage (command_name, user_id) VALUES (%s, %s)',
@@ -348,8 +455,9 @@ def log_command_usage(command_name: str, user_id: int):
         if command_name not in stats['command_usage']:
             stats['command_usage'][command_name] = 0
         stats['command_usage'][command_name] += 1
+        logger.debug(f"✅ Command logged (total for /{command_name}: {stats['command_usage'][command_name]})")
     except Exception as e:
-        print(f"Error in log_command_usage: {e}")
+        logger.error(f"❌ Error in log_command_usage: {e}")
         if conn:
             conn.rollback()
             return_db_connection(conn)
@@ -358,6 +466,7 @@ def log_command_usage(command_name: str, user_id: int):
 def get_rarity_distribution() -> Dict:
     """Get distribution of fruit rarities rolled"""
     try:
+        logger.debug("📊 Fetching rarity distribution")
         conn = get_db_connection()
         cur = conn.cursor()
 
@@ -382,13 +491,15 @@ def get_rarity_distribution() -> Dict:
 
         cur.close()
         return_db_connection(conn)
+        logger.debug(f"✅ Rarity distribution: {rarity_data}")
         return rarity_data
     except Exception as e:
-        print(f"Error in get_rarity_distribution: {e}")
+        logger.error(f"❌ Error in get_rarity_distribution: {e}")
         return {}
 
 
 # Fruit list with rarities (Blox Fruits)
+logger.info("🍎 Loading fruit database...")
 FRUITS_DATA = {
     # Common (Gray)
     "Rocket": {"rarity": "Common", "color": 0x808080, "emoji": "🚀"},
@@ -463,6 +574,8 @@ RARITY_COLORS = {
     "Mythic": 0xdc2626
 }
 
+logger.info(f"✅ Loaded {len(FRUITS_DATA)} fruits across {len(RARITY_GROUPS)} rarity tiers")
+
 
 # Fruit selection view with buttons - supports multiple pages
 class FruitSelectionView(discord.ui.View):
@@ -473,6 +586,8 @@ class FruitSelectionView(discord.ui.View):
         self.page_name = page_name
         self.total_pages = total_pages
         self.current_page = current_page
+        
+        logger.debug(f"🎮 Created FruitSelectionView for user {user_id}: {page_name}")
 
         # Create buttons for fruits (up to 20 buttons per page, 4 rows of 5)
         for i, fruit in enumerate(fruits_list[:20]):
@@ -489,7 +604,10 @@ class FruitSelectionView(discord.ui.View):
 
     def create_callback(self, fruit_name: str):
         async def callback(interaction: discord.Interaction):
+            logger.info(f"🎲 Fruit button clicked: {fruit_name} by {interaction.user} (ID: {interaction.user.id})")
+            
             if interaction.user.id != self.user_id:
+                logger.warning(f"⚠️  Unauthorized button click by {interaction.user.id}, expected {self.user_id}")
                 await interaction.response.send_message("❌ This selection is not for you!", ephemeral=True)
                 return
 
@@ -498,6 +616,8 @@ class FruitSelectionView(discord.ui.View):
 
             # Get fruit data
             fruit_data = FRUITS_DATA[fruit_name]
+            
+            logger.info(f"✅ Valid fruit selection: {fruit_name} ({fruit_data['rarity']})")
 
             # Log the roll
             log_roll(self.user_id, str(interaction.user), fruit_name)
@@ -513,15 +633,18 @@ class FruitSelectionView(discord.ui.View):
             }
             rarity_display = rarity_emoji.get(fruit_data["rarity"], "⚪")
 
+            logger.info(f"📢 Broadcasting roll to channel: {channel.name}")
             await channel.send(
                 f"🎲 <@{self.user_id}> just rolled {rarity_display} **{fruit_name}** {fruit_data['emoji']} ({fruit_data['rarity']})!")
 
             # Update ephemeral message
             next_roll_time = datetime.now(timezone.utc) + timedelta(hours=ROLL_COOLDOWN_HOURS)
+            logger.debug(f"📝 Updating ephemeral message for user")
             await interaction.response.edit_message(
                 content=f"✅ Logged your roll: {fruit_data['emoji']} **{fruit_name}** ({fruit_data['rarity']})\n⏰ Next roll available <t:{int(next_roll_time.timestamp())}:R>",
                 view=None
             )
+            logger.info(f"✅ Roll complete for {interaction.user}")
 
         return callback
 
@@ -532,10 +655,14 @@ class PageSelectionView(discord.ui.View):
     def __init__(self, user_id: int):
         super().__init__(timeout=180)
         self.user_id = user_id
+        logger.debug(f"🎮 Created PageSelectionView for user {user_id}")
 
     @discord.ui.button(label="📝 Alphabetical Order", style=discord.ButtonStyle.primary, row=0)
     async def alphabetical(self, interaction: discord.Interaction, button: discord.ui.Button):
+        logger.info(f"📝 Alphabetical sorting selected by {interaction.user}")
+        
         if interaction.user.id != self.user_id:
+            logger.warning(f"⚠️  Unauthorized button click")
             await interaction.response.send_message("❌ This selection is not for you!", ephemeral=True)
             return
 
@@ -547,10 +674,14 @@ class PageSelectionView(discord.ui.View):
             color=discord.Color.blue()
         )
         await interaction.response.edit_message(embed=embed, view=view)
+        logger.debug("✅ Switched to alphabetical pages view")
 
     @discord.ui.button(label="✨ Sort by Rarity", style=discord.ButtonStyle.secondary, row=0)
     async def by_rarity(self, interaction: discord.Interaction, button: discord.ui.Button):
+        logger.info(f"✨ Rarity sorting selected by {interaction.user}")
+        
         if interaction.user.id != self.user_id:
+            logger.warning(f"⚠️  Unauthorized button click")
             await interaction.response.send_message("❌ This selection is not for you!", ephemeral=True)
             return
 
@@ -562,6 +693,7 @@ class PageSelectionView(discord.ui.View):
             color=discord.Color.purple()
         )
         await interaction.response.edit_message(embed=embed, view=view)
+        logger.debug("✅ Switched to rarity selection view")
 
 
 class AlphabeticalPagesView(discord.ui.View):
@@ -576,9 +708,13 @@ class AlphabeticalPagesView(discord.ui.View):
         fruits_sorted = sorted(FRUITS)
         for i in range(0, len(fruits_sorted), 20):
             self.pages.append(fruits_sorted[i:i + 20])
+        
+        logger.debug(f"📄 Created {len(self.pages)} alphabetical pages")
 
     @discord.ui.button(label="Page 1 (Blade-Gas)", style=discord.ButtonStyle.primary, row=0)
     async def page1(self, interaction: discord.Interaction, button: discord.ui.Button):
+        logger.info(f"📄 Page 1 selected by {interaction.user}")
+        
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("❌ This selection is not for you!", ephemeral=True)
             return
@@ -597,6 +733,8 @@ class AlphabeticalPagesView(discord.ui.View):
 
     @discord.ui.button(label="Page 2 (Gravity-Portal)", style=discord.ButtonStyle.primary, row=0)
     async def page2(self, interaction: discord.Interaction, button: discord.ui.Button):
+        logger.info(f"📄 Page 2 selected by {interaction.user}")
+        
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("❌ This selection is not for you!", ephemeral=True)
             return
@@ -615,6 +753,8 @@ class AlphabeticalPagesView(discord.ui.View):
 
     @discord.ui.button(label="Page 3 (Quake-Yeti)", style=discord.ButtonStyle.primary, row=1)
     async def page3(self, interaction: discord.Interaction, button: discord.ui.Button):
+        logger.info(f"📄 Page 3 selected by {interaction.user}")
+        
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("❌ This selection is not for you!", ephemeral=True)
             return
@@ -633,6 +773,8 @@ class AlphabeticalPagesView(discord.ui.View):
 
     @discord.ui.button(label="🔙 Back to Sort Options", style=discord.ButtonStyle.secondary, row=2)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        logger.info(f"🔙 Back button clicked by {interaction.user}")
+        
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("❌ This selection is not for you!", ephemeral=True)
             return
@@ -652,49 +794,51 @@ class RaritySelectionView(discord.ui.View):
     def __init__(self, user_id: int):
         super().__init__(timeout=180)
         self.user_id = user_id
+        logger.debug(f"🎮 Created RaritySelectionView for user {user_id}")
 
     @discord.ui.button(label="⚪ Common", style=discord.ButtonStyle.secondary, emoji="⚪", row=0)
     async def common(self, interaction: discord.Interaction, button: discord.ui.Button):
+        logger.info(f"⚪ Common rarity selected by {interaction.user}")
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("❌ This selection is not for you!", ephemeral=True)
             return
-
         await self.show_rarity_fruits(interaction, "Common")
 
     @discord.ui.button(label="🔵 Uncommon", style=discord.ButtonStyle.primary, emoji="🔵", row=0)
     async def uncommon(self, interaction: discord.Interaction, button: discord.ui.Button):
+        logger.info(f"🔵 Uncommon rarity selected by {interaction.user}")
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("❌ This selection is not for you!", ephemeral=True)
             return
-
         await self.show_rarity_fruits(interaction, "Uncommon")
 
     @discord.ui.button(label="🟣 Rare", style=discord.ButtonStyle.primary, emoji="🟣", row=1)
     async def rare(self, interaction: discord.Interaction, button: discord.ui.Button):
+        logger.info(f"🟣 Rare rarity selected by {interaction.user}")
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("❌ This selection is not for you!", ephemeral=True)
             return
-
         await self.show_rarity_fruits(interaction, "Rare")
 
     @discord.ui.button(label="🔮 Legendary", style=discord.ButtonStyle.primary, emoji="🔮", row=1)
     async def legendary(self, interaction: discord.Interaction, button: discord.ui.Button):
+        logger.info(f"🔮 Legendary rarity selected by {interaction.user}")
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("❌ This selection is not for you!", ephemeral=True)
             return
-
         await self.show_rarity_fruits(interaction, "Legendary")
 
     @discord.ui.button(label="🔴 Mythic", style=discord.ButtonStyle.danger, emoji="🔴", row=2)
     async def mythic(self, interaction: discord.Interaction, button: discord.ui.Button):
+        logger.info(f"🔴 Mythic rarity selected by {interaction.user}")
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("❌ This selection is not for you!", ephemeral=True)
             return
-
         await self.show_rarity_fruits(interaction, "Mythic")
 
     @discord.ui.button(label="🔙 Back to Sort Options", style=discord.ButtonStyle.secondary, row=3)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        logger.info(f"🔙 Back button clicked by {interaction.user}")
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("❌ This selection is not for you!", ephemeral=True)
             return
@@ -728,50 +872,75 @@ class RaritySelectionView(discord.ui.View):
         embed.set_footer(text=f"⏱️ You have 3 minutes • {len(fruits_list)} {rarity} fruits")
 
         await interaction.response.edit_message(embed=embed, view=view)
+        logger.debug(f"✅ Showing {len(fruits_list)} {rarity} fruits")
 
 
 @bot.event
 async def on_ready():
+    logger.info("=" * 80)
+    logger.info("🎉 BOT READY EVENT TRIGGERED")
+    logger.info("=" * 80)
+    
     stats['bot_start_time'] = datetime.now(timezone.utc)
     stats['guilds_count'] = len(bot.guilds)
+
+    logger.info(f"🤖 Logged in as: {bot.user.name}")
+    logger.info(f"🆔 Bot ID: {bot.user.id}")
+    logger.info(f"🌐 Connected to {len(bot.guilds)} guild(s):")
+    
+    for guild in bot.guilds:
+        logger.info(f"   - {guild.name} (ID: {guild.id}, Members: {guild.member_count})")
 
     # Initialize database
     init_database()
 
     # Update active users count
     stats['active_users'] = len(get_all_users())
+    logger.info(f"👥 Active users in database: {stats['active_users']}")
 
     # Sync slash commands
+    logger.info("🔄 Syncing slash commands with Discord...")
     try:
         synced = await bot.tree.sync()
-        print(f'✅ Synced {len(synced)} slash command(s)')
+        logger.info(f"✅ Successfully synced {len(synced)} slash command(s):")
+        for cmd in synced:
+            logger.info(f"   - /{cmd.name}")
     except Exception as e:
-        print(f'❌ Failed to sync commands: {e}')
+        logger.error(f"❌ Failed to sync commands: {e}")
 
-    print(f'{bot.user} has connected to Discord!')
-    print(f'Bot is in {len(bot.guilds)} guild(s)')
-    print(f'🍎 Fruit Roll Tracker Ready!')
+    logger.info("=" * 80)
+    logger.info("✅ BOT FULLY INITIALIZED AND READY")
+    logger.info("🍎 Fruit Roll Tracker is now ONLINE!")
+    logger.info("=" * 80)
 
     # Start notification checker
     if not notification_checker.is_running():
+        logger.info("⏰ Starting notification checker task...")
         notification_checker.start()
+        logger.info("✅ Notification checker task started")
 
     # Notify initial users
+    logger.info("📢 Sending startup notifications...")
     await notify_initial_users()
 
 
 async def notify_initial_users():
     """Send initial notification to designated users in the notification channel"""
-    await asyncio.sleep(5)  # Wait for bot to be fully ready
+    logger.info("⏳ Waiting 5 seconds before sending notifications...")
+    await asyncio.sleep(5)
 
     try:
+        logger.info(f"🔍 Looking for notification channel ID: {NOTIFICATION_CHANNEL_ID}")
         channel = bot.get_channel(NOTIFICATION_CHANNEL_ID)
         if not channel:
-            print(f"❌ Could not find notification channel with ID {NOTIFICATION_CHANNEL_ID}")
+            logger.error(f"❌ Could not find notification channel with ID {NOTIFICATION_CHANNEL_ID}")
             return
+
+        logger.info(f"✅ Found channel: {channel.name} in guild: {channel.guild.name}")
 
         # Create mentions string
         mentions = " ".join([f"<@{user_id}>" for user_id in NOTIFICATION_USERS])
+        logger.info(f"📝 Mentioning {len(NOTIFICATION_USERS)} users")
 
         embed = discord.Embed(
             title="🎲 Blox Fruits Roll Tracker is Online!",
@@ -800,31 +969,36 @@ async def notify_initial_users():
         )
         embed.set_footer(text="SorynTech Blox Fruits Bot | 🦈 Part of the SorynTech Bot Suite")
 
+        logger.info("📤 Sending startup notification embed...")
         await channel.send(content=mentions, embed=embed)
-        print(f"✅ Sent startup notification to channel {channel.name}")
+        logger.info(f"✅ Sent startup notification to channel: {channel.name}")
     except Exception as e:
-        print(f"❌ Failed to send startup notification: {e}")
+        logger.error(f"❌ Failed to send startup notification: {e}", exc_info=True)
 
 
 # Notification checker task
 @tasks.loop(minutes=1)
 async def notification_checker():
     """Check for users who need roll reminders"""
+    logger.debug("⏰ Notification checker running...")
     now = datetime.now(timezone.utc)
     users = get_all_users()
 
     # Get notification channel
     channel = bot.get_channel(NOTIFICATION_CHANNEL_ID)
     if not channel:
-        print(f"❌ Could not find notification channel with ID {NOTIFICATION_CHANNEL_ID}")
+        logger.error(f"❌ Could not find notification channel with ID {NOTIFICATION_CHANNEL_ID}")
         return
 
+    notifications_sent = 0
     for user_data in users:
         if not user_data['notifications_enabled']:
             continue
 
         if user_data['next_roll_time'] and user_data['next_roll_time'] <= now:
             try:
+                logger.info(f"🔔 Sending roll reminder to {user_data['username']} (ID: {user_data['user_id']})")
+                
                 embed = discord.Embed(
                     title="🎲 Fruit Roll Ready!",
                     description=f"<@{user_data['user_id']}>'s fruit roll cooldown is complete!",
@@ -838,6 +1012,7 @@ async def notification_checker():
                 embed.set_footer(text="Use /sleep to disable these reminders")
 
                 await channel.send(content=f"<@{user_data['user_id']}>", embed=embed)
+                notifications_sent += 1
 
                 # Clear next_roll_time so we don't spam
                 try:
@@ -849,27 +1024,41 @@ async def notification_checker():
                     cur.close()
                     return_db_connection(conn)
                 except Exception as e:
-                    print(f"Error updating next_roll_time: {e}")
+                    logger.error(f"❌ Error updating next_roll_time: {e}")
 
-                print(f"✅ Sent roll reminder to {user_data['username']} in channel")
+                logger.info(f"✅ Sent roll reminder to {user_data['username']}")
             except Exception as e:
-                print(f"❌ Failed to send reminder to {user_data['user_id']}: {e}")
+                logger.error(f"❌ Failed to send reminder to {user_data['user_id']}: {e}")
+    
+    if notifications_sent > 0:
+        logger.info(f"📬 Sent {notifications_sent} roll reminder(s) this cycle")
+    else:
+        logger.debug("✅ No reminders to send this cycle")
 
 
 @notification_checker.before_loop
 async def before_notification_checker():
+    logger.info("⏰ Notification checker waiting for bot to be ready...")
     await bot.wait_until_ready()
+    logger.info("✅ Notification checker ready to start")
 
 
 # Slash Commands
 @bot.tree.command(name='fruit-roll', description='Log your fruit roll')
 async def fruit_roll(interaction: discord.Interaction):
     """Log a fruit roll"""
+    logger.info("=" * 80)
+    logger.info(f"🎲 /fruit-roll command invoked by {interaction.user} (ID: {interaction.user.id})")
+    logger.info(f"   Guild: {interaction.guild.name if interaction.guild else 'DM'}")
+    logger.info(f"   Channel: {interaction.channel.name if hasattr(interaction.channel, 'name') else 'DM'}")
+    
     log_command_usage('fruit-roll', interaction.user.id)
 
     # Check if user exists, create if not
+    logger.debug("👤 Checking if user exists in database...")
     user_data = get_user(interaction.user.id)
     if not user_data:
+        logger.info("✨ User not found, creating new user entry...")
         create_or_update_user(interaction.user.id, str(interaction.user))
         user_data = get_user(interaction.user.id)
 
@@ -881,6 +1070,8 @@ async def fruit_roll(interaction: discord.Interaction):
             hours = int(time_left.total_seconds() // 3600)
             minutes = int((time_left.total_seconds() % 3600) // 60)
 
+            logger.warning(f"⏰ User on cooldown! Time remaining: {hours}h {minutes}m")
+            
             embed = discord.Embed(
                 title="⏰ Roll On Cooldown",
                 description=f"Your next roll is available <t:{int(user_data['next_roll_time'].timestamp())}:R>",
@@ -892,9 +1083,11 @@ async def fruit_roll(interaction: discord.Interaction):
                 inline=False
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
+            logger.info("✅ Cooldown message sent")
             return
 
     # Show fruit selection options
+    logger.info("✅ User can roll! Showing fruit selection menu...")
     embed = discord.Embed(
         title="🎲 Log Your Fruit Roll",
         description="How would you like to browse fruits?",
@@ -914,16 +1107,20 @@ async def fruit_roll(interaction: discord.Interaction):
 
     view = PageSelectionView(interaction.user.id)
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    logger.info("✅ Fruit selection menu sent to user")
+    logger.info("=" * 80)
 
 
 @bot.tree.command(name='fruits', description='View all your rolled fruits')
 async def fruits(interaction: discord.Interaction):
     """View all rolled fruits for the user"""
+    logger.info(f"📊 /fruits command invoked by {interaction.user} (ID: {interaction.user.id})")
     log_command_usage('fruits', interaction.user.id)
 
     rolls = get_user_rolls(interaction.user.id)
 
     if not rolls:
+        logger.info(f"⚠️  User {interaction.user} has no rolls yet")
         embed = discord.Embed(
             title="📊 Your Fruit Rolls",
             description="You haven't logged any fruit rolls yet!\n\nUse `/fruit-roll` to log your first roll.",
@@ -932,6 +1129,8 @@ async def fruits(interaction: discord.Interaction):
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
 
+    logger.info(f"📊 User has {len(rolls)} total rolls")
+
     # Count fruits by rarity
     rarity_counts = {"Common": 0, "Uncommon": 0, "Rare": 0, "Legendary": 0, "Mythic": 0}
     for roll in rolls:
@@ -939,6 +1138,8 @@ async def fruits(interaction: discord.Interaction):
         if fruit_name in FRUITS_DATA:
             rarity = FRUITS_DATA[fruit_name]["rarity"]
             rarity_counts[rarity] += 1
+
+    logger.debug(f"Rarity breakdown: {rarity_counts}")
 
     embed = discord.Embed(
         title="🍎 Your Fruit Roll History",
@@ -978,11 +1179,13 @@ async def fruits(interaction: discord.Interaction):
         embed.set_footer(text="SorynTech Blox Fruits Tracker")
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
+    logger.info(f"✅ Sent roll history to {interaction.user}")
 
 
 @bot.tree.command(name='sleep', description='Disable fruit roll reminders')
 async def sleep_mode(interaction: discord.Interaction):
     """Disable roll reminders"""
+    logger.info(f"💤 /sleep command invoked by {interaction.user} (ID: {interaction.user.id})")
     log_command_usage('sleep', interaction.user.id)
 
     user_data = get_user(interaction.user.id)
@@ -1003,11 +1206,13 @@ async def sleep_mode(interaction: discord.Interaction):
     )
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
+    logger.info(f"✅ Sleep mode enabled for {interaction.user}")
 
 
 @bot.tree.command(name='awake', description='Enable fruit roll reminders')
 async def awake_mode(interaction: discord.Interaction):
     """Enable roll reminders"""
+    logger.info(f"☀️ /awake command invoked by {interaction.user} (ID: {interaction.user.id})")
     log_command_usage('awake', interaction.user.id)
 
     user_data = get_user(interaction.user.id)
@@ -1028,16 +1233,22 @@ async def awake_mode(interaction: discord.Interaction):
     )
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
+    logger.info(f"✅ Awake mode enabled for {interaction.user}")
 
 
 # Owner Commands
 @bot.tree.command(name='stats-link', description='[OWNER] Get the stats page link')
 async def stats_link(interaction: discord.Interaction):
     """Get stats page credentials"""
+    logger.info(f"📊 /stats-link command invoked by {interaction.user} (ID: {interaction.user.id})")
+    
     if interaction.user.id != OWNER_ID:
+        logger.warning(f"⚠️  Unauthorized access attempt by {interaction.user}")
         await interaction.response.send_message("❌ Owner only command", ephemeral=True)
         return
 
+    logger.info("✅ Owner authorized, sending stats credentials")
+    
     embed = discord.Embed(
         title="📊 Stats Page Access",
         description="Here are your stats page credentials:",
@@ -1468,6 +1679,8 @@ STATS_PAGE = """
 
 async def handle_health(request):
     """Public health check endpoint"""
+    logger.debug("🏥 Health check endpoint accessed")
+    
     uptime = "Not started"
     if stats['bot_start_time']:
         delta = datetime.now(timezone.utc) - stats['bot_start_time']
@@ -1487,8 +1700,13 @@ async def handle_health(request):
 
 async def handle_stats(request):
     """Protected stats page"""
+    logger.debug("📊 Stats page accessed")
+    
     if not check_auth(request):
+        logger.warning("⚠️  Unauthorized stats page access attempt")
         return get_auth_response()
+
+    logger.info("✅ Stats page access authorized")
 
     # Calculate uptime
     uptime = "Not started"
@@ -1597,6 +1815,7 @@ async def handle_stats(request):
 
 async def handle_root(request):
     """Root redirects to health"""
+    logger.debug("🌐 Root endpoint accessed")
     return await handle_health(request)
 
 
@@ -1619,12 +1838,16 @@ async def handle_favicon(request):
         else:
             return web.Response(status=404)
     except Exception as e:
-        print(f"Error serving favicon: {e}")
+        logger.error(f"Error serving favicon: {e}")
         return web.Response(status=404)
 
 
 async def start_web_server():
     """Start the web server"""
+    logger.info("=" * 80)
+    logger.info("🌐 STARTING WEB SERVER")
+    logger.info("=" * 80)
+    
     app = web.Application()
     app.router.add_get('/', handle_root)
     app.router.add_get('/health', handle_health)
@@ -1637,21 +1860,26 @@ async def start_web_server():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
-    print(f'🌐 Web server started on port {port}')
-    print(f'🏥 Health check: http://0.0.0.0:{port}/')
-    print(f'📊 Stats page: http://0.0.0.0:{port}/stats (Protected)')
+    logger.info(f"✅ Web server started successfully on 0.0.0.0:{port}")
+    logger.info(f"🏥 Health check: http://0.0.0.0:{port}/")
+    logger.info(f"📊 Stats page: http://0.0.0.0:{port}/stats (Protected)")
+    logger.info("=" * 80)
 
 
 async def main():
     """Main function"""
+    logger.info("🚀 MAIN FUNCTION STARTING...")
+    
     await start_web_server()
 
     TOKEN = os.getenv('DISCORD_TOKEN')
     if not TOKEN:
-        print("ERROR: DISCORD_TOKEN not found in .env file!")
+        logger.critical("❌ DISCORD_TOKEN not found in .env file!")
+        logger.critical("Please set the DISCORD_TOKEN environment variable")
         return
 
-    print("✅ Discord token loaded")
+    logger.info("✅ Discord token loaded from environment")
+    logger.info("🔐 Connecting to Discord...")
 
     async with bot:
         await bot.start(TOKEN)
@@ -1659,10 +1887,20 @@ async def main():
 
 if __name__ == "__main__":
     try:
+        logger.info("=" * 80)
+        logger.info("🦈 BLOX FRUITS BOT STARTING...")
+        logger.info("=" * 80)
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n👋 Bot shutting down...")
+        logger.info("\n" + "=" * 80)
+        logger.info("👋 SHUTDOWN SIGNAL RECEIVED")
+        logger.info("=" * 80)
+        logger.info("🛑 Bot shutting down gracefully...")
     finally:
         if db_pool:
+            logger.info("🔌 Closing database connection pool...")
             db_pool.closeall()
-            print("✅ Supabase connections closed")
+            logger.info("✅ Supabase connections closed")
+        logger.info("=" * 80)
+        logger.info("✅ SHUTDOWN COMPLETE")
+        logger.info("=" * 80)
