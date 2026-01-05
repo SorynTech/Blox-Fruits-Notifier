@@ -949,7 +949,7 @@ async def on_ready():
     init_database()
 
     # Update active users count
-    stats['active_users'] = len(get_all_users())
+    stats['active_users'] =  len(await get_all_users())
     logger.info(f"👥 Active users in database: {stats['active_users']}")
 
     # Sync slash commands
