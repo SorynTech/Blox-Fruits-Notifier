@@ -13,6 +13,7 @@ from psycopg2.pool import SimpleConnectionPool
 from typing import Optional, List, Dict
 import logging
 import sys
+import concurrent.futures
 
 # ============================================================================
 # LOGGING CONFIGURATION - VERBOSE MODE
@@ -97,6 +98,14 @@ logger.info(f"   - Roll Cooldown: {ROLL_COOLDOWN_HOURS} hours")
 logger.info(f"   - Stats Auth: {STATS_USER}:{'*' * len(STATS_PASS)}")
 logger.info(f"   - Dad User ID: {DAD_USER_ID}")
 
+# Ignored user IDs (alts and bots)
+IGNORED_ALTS = [1364903422129733654, 1454897720610521251, 1127038223013658694]
+IGNORED_BOTS = [1455626479940538533, 1451606115249815663, 443545183997657120, 762217899355013120]
+IGNORED_USERS = set(IGNORED_ALTS + IGNORED_BOTS)
+
+logger.info(f"   - Ignored Alts: {len(IGNORED_ALTS)}")
+logger.info(f"   - Ignored Bots: {len(IGNORED_BOTS)}")
+
 # Supabase Database Configuration
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 if not SUPABASE_URL:
@@ -108,6 +117,9 @@ else:
 
 # Connection pool for Supabase
 db_pool = None
+
+# Thread pool executor for database operations to prevent event loop blocking
+db_executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
 # Statistics tracking
 stats = {
@@ -190,6 +202,10 @@ def init_database():
                            BOOLEAN
                            DEFAULT
                            TRUE,
+                           suspended
+                           BOOLEAN
+                           DEFAULT
+                           FALSE,
                            created_at
                            TIMESTAMP
                            WITH
@@ -199,6 +215,13 @@ def init_database():
                            CURRENT_TIMESTAMP
                        )''')
         logger.info("✅ 'users' table ready")
+        
+        # Add suspended column if it doesn't exist (for existing databases)
+        try:
+            cur.execute('''ALTER TABLE users ADD COLUMN IF NOT EXISTS suspended BOOLEAN DEFAULT FALSE''')
+            logger.info("✅ 'suspended' column ensured in users table")
+        except Exception as e:
+            logger.debug(f"Column suspended might already exist: {e}")
 
         # Rolls table - NOW INCLUDES RARITY
         logger.info("📋 Creating 'rolls' table if not exists...")
@@ -290,8 +313,8 @@ def init_database():
 
 
 # Database helper functions
-def get_user(user_id: int) -> Optional[Dict]:
-    """Get user from database"""
+def _get_user_sync(user_id: int) -> Optional[Dict]:
+    """Get user from database - synchronous version"""
     try:
         logger.debug(f"👤 Fetching user data for ID: {user_id}")
         conn = get_db_connection()
@@ -307,8 +330,14 @@ def get_user(user_id: int) -> Optional[Dict]:
         logger.debug(f"⚠️  User not found: {user_id}")
         return None
     except Exception as e:
-        logger.error(f"❌ Error in get_user: {e}")
+        logger.error(f"❌ Error in _get_user_sync: {e}")
         return None
+
+
+async def get_user(user_id: int) -> Optional[Dict]:
+    """Get user from database - async wrapper"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(db_executor, _get_user_sync, user_id)
 
 
 def create_or_update_user(user_id: int, username: str):
@@ -385,8 +414,8 @@ def log_roll(user_id: int, username: str, fruit_name: str):
             return_db_connection(conn)
 
 
-def get_user_rolls(user_id: int) -> List[Dict]:
-    """Get all rolls for a user"""
+def _get_user_rolls_sync(user_id: int) -> List[Dict]:
+    """Get all rolls for a user - synchronous version"""
     try:
         logger.debug(f"📊 Fetching roll history for user ID: {user_id}")
         conn = get_db_connection()
@@ -402,12 +431,18 @@ def get_user_rolls(user_id: int) -> List[Dict]:
         logger.debug(f"✅ Found {len(rows)} rolls for user")
         return [{'fruit': row['fruit_name'], 'time': row['rolled_at']} for row in rows]
     except Exception as e:
-        logger.error(f"❌ Error in get_user_rolls: {e}")
+        logger.error(f"❌ Error in _get_user_rolls_sync: {e}")
         return []
 
 
-def get_all_users() -> List[Dict]:
-    """Get all users from database"""
+async def get_user_rolls(user_id: int) -> List[Dict]:
+    """Get all rolls for a user - async wrapper"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(db_executor, _get_user_rolls_sync, user_id)
+
+
+def _get_all_users_sync() -> List[Dict]:
+    """Get all users from database - synchronous version"""
     try:
         logger.debug("👥 Fetching all users from database")
         conn = get_db_connection()
@@ -426,8 +461,14 @@ def get_all_users() -> List[Dict]:
         logger.debug(f"✅ Fetched {len(rows)} users")
         return [dict(row) for row in rows]
     except Exception as e:
-        logger.error(f"❌ Error in get_all_users: {e}")
+        logger.error(f"❌ Error in _get_all_users_sync: {e}")
         return []
+
+
+async def get_all_users() -> List[Dict]:
+    """Get all users from database - async wrapper"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(db_executor, _get_all_users_sync)
 
 
 def toggle_notifications(user_id: int, enabled: bool):
@@ -506,6 +547,114 @@ def get_rarity_distribution() -> Dict:
     except Exception as e:
         logger.error(f"❌ Error in get_rarity_distribution: {e}")
         return {}
+
+
+def _clear_next_roll_time(user_id: int):
+    """Clear next_roll_time for a user - runs in executor"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('UPDATE users SET next_roll_time = NULL WHERE user_id = %s', (user_id,))
+        conn.commit()
+        cur.close()
+        return_db_connection(conn)
+    except Exception as e:
+        logger.error(f"❌ Error in _clear_next_roll_time: {e}")
+        if 'conn' in locals():
+            try:
+                conn.rollback()
+                return_db_connection(conn)
+            except:
+                pass
+
+
+async def sync_guild_members(guild: discord.Guild):
+    """Sync all guild members to database (excluding bots and ignored users)"""
+    logger.info(f"🔄 Syncing members from guild: {guild.name}")
+    
+    synced_count = 0
+    skipped_count = 0
+    
+    for member in guild.members:
+        # Skip bots and ignored users
+        if member.bot or member.id in IGNORED_USERS:
+            skipped_count += 1
+            logger.debug(f"⏭️  Skipping {member.name} (bot={member.bot}, ignored={member.id in IGNORED_USERS})")
+            continue
+        
+        try:
+            # Check if user exists
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute('SELECT user_id FROM users WHERE user_id = %s', (member.id,))
+            exists = cur.fetchone()
+            
+            if not exists:
+                # Create new user
+                cur.execute('''INSERT INTO users (user_id, username, total_rolls, notifications_enabled, suspended)
+                               VALUES (%s, %s, 0, TRUE, FALSE)''', (member.id, member.name))
+                conn.commit()
+                synced_count += 1
+                logger.info(f"✨ Added new member to database: {member.name} (ID: {member.id})")
+            else:
+                # Update username if changed
+                cur.execute('UPDATE users SET username = %s WHERE user_id = %s', (member.name, member.id))
+                conn.commit()
+                logger.debug(f"📝 Updated username for {member.name}")
+            
+            cur.close()
+            return_db_connection(conn)
+            
+        except Exception as e:
+            logger.error(f"❌ Error syncing member {member.name}: {e}")
+            if 'conn' in locals():
+                try:
+                    conn.rollback()
+                    return_db_connection(conn)
+                except:
+                    pass
+    
+    logger.info(f"✅ Member sync complete: {synced_count} added, {skipped_count} skipped")
+    return synced_count, skipped_count
+
+
+def suspend_user(user_id: int, suspend: bool = True):
+    """Suspend or unsuspend a user"""
+    try:
+        status = "SUSPENDED" if suspend else "UNSUSPENDED"
+        logger.info(f"🔒 Setting user {user_id} to {status}")
+        
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Check if user exists
+        cur.execute('SELECT username FROM users WHERE user_id = %s', (user_id,))
+        user = cur.fetchone()
+        
+        if not user:
+            cur.close()
+            return_db_connection(conn)
+            logger.warning(f"⚠️  User {user_id} not found in database")
+            return False, "User not found in database"
+        
+        # Update suspension status
+        cur.execute('UPDATE users SET suspended = %s WHERE user_id = %s', (suspend, user_id))
+        conn.commit()
+        cur.close()
+        return_db_connection(conn)
+        
+        logger.info(f"✅ User {user[0]} (ID: {user_id}) {status}")
+        return True, f"User {user[0]} {status.lower()}"
+        
+    except Exception as e:
+        logger.error(f"❌ Error in suspend_user: {e}")
+        if 'conn' in locals():
+            try:
+                conn.rollback()
+                return_db_connection(conn)
+            except:
+                pass
+        return False, f"Error: {str(e)}"
 
 
 # Fruit list with rarities (Blox Fruits)
@@ -907,6 +1056,19 @@ async def on_ready():
     # Initialize database
     init_database()
 
+    # Sync guild members to database
+    logger.info("=" * 80)
+    logger.info("👥 SYNCING GUILD MEMBERS TO DATABASE")
+    logger.info("=" * 80)
+    total_synced = 0
+    total_skipped = 0
+    for guild in bot.guilds:
+        synced, skipped = await sync_guild_members(guild)
+        total_synced += synced
+        total_skipped += skipped
+    logger.info(f"✅ Total members synced across all guilds: {total_synced} added, {total_skipped} skipped")
+    logger.info("=" * 80)
+
     # Update active users count
     stats['active_users'] = len(get_all_users())
     logger.info(f"👥 Active users in database: {stats['active_users']}")
@@ -995,7 +1157,8 @@ async def notification_checker():
     """Check for users who need roll reminders"""
     logger.debug("⏰ Notification checker running...")
     now = datetime.now(timezone.utc)
-    users = get_all_users()
+    # CRITICAL FIX: Use await for async function to prevent event loop blocking
+    users = await get_all_users()
 
     # Get notification channel
     channel = bot.get_channel(NOTIFICATION_CHANNEL_ID)
@@ -1044,17 +1207,9 @@ async def notification_checker():
                 await channel.send(content=mention_text, embed=embed)
                 notifications_sent += 1
 
-                # Clear next_roll_time so we don't spam
-                try:
-                    conn = get_db_connection()
-                    cur = conn.cursor()
-                    cur.execute('UPDATE users SET next_roll_time = NULL WHERE user_id = %s',
-                                (user_data['user_id'],))
-                    conn.commit()
-                    cur.close()
-                    return_db_connection(conn)
-                except Exception as e:
-                    logger.error(f"❌ Error updating next_roll_time: {e}")
+                # Clear next_roll_time so we don't spam - run in executor to avoid blocking
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(db_executor, _clear_next_roll_time, user_data['user_id'])
 
                 logger.info(f"✅ Sent roll reminder to {display_name}")
             except Exception as e:
@@ -1086,11 +1241,20 @@ async def fruit_roll(interaction: discord.Interaction):
 
     # Check if user exists, create if not
     logger.debug("👤 Checking if user exists in database...")
-    user_data = get_user(interaction.user.id)
+    user_data = await get_user(interaction.user.id)
     if not user_data:
         logger.info("✨ User not found, creating new user entry...")
         create_or_update_user(interaction.user.id, interaction.user.name)
-        user_data = get_user(interaction.user.id)
+        user_data = await get_user(interaction.user.id)
+    
+    # Check if user is suspended
+    if user_data and user_data.get('suspended', False):
+        logger.warning(f"🔒 Suspended user attempted to roll: {interaction.user}")
+        await interaction.response.send_message(
+            "Hey Soryntech Temporaily suspended your user ID dm him to fix this",
+            ephemeral=True
+        )
+        return
 
     # Check if user can roll (cooldown)
     if user_data and user_data['next_roll_time']:
@@ -1147,7 +1311,7 @@ async def fruits(interaction: discord.Interaction):
     logger.info(f"📊 /fruits command invoked by {interaction.user} (ID: {interaction.user.id})")
     log_command_usage('fruits', interaction.user.id)
 
-    rolls = get_user_rolls(interaction.user.id)
+    rolls = await get_user_rolls(interaction.user.id)
 
     if not rolls:
         logger.info(f"⚠️  User {interaction.user} has no rolls yet")
@@ -1218,7 +1382,7 @@ async def sleep_mode(interaction: discord.Interaction):
     logger.info(f"💤 /sleep command invoked by {interaction.user} (ID: {interaction.user.id})")
     log_command_usage('sleep', interaction.user.id)
 
-    user_data = get_user(interaction.user.id)
+    user_data = await get_user(interaction.user.id)
     if not user_data:
         create_or_update_user(interaction.user.id, interaction.user.name)
 
@@ -1245,7 +1409,7 @@ async def awake_mode(interaction: discord.Interaction):
     logger.info(f"☀️ /awake command invoked by {interaction.user} (ID: {interaction.user.id})")
     log_command_usage('awake', interaction.user.id)
 
-    user_data = get_user(interaction.user.id)
+    user_data = await get_user(interaction.user.id)
     if not user_data:
         create_or_update_user(interaction.user.id, interaction.user.name)
 
@@ -1290,6 +1454,79 @@ async def stats_link(interaction: discord.Interaction):
     embed.add_field(name="LINK:", value="https://blox-fruits-notifier-msvi.onrender.com/stats", inline=False)
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name='suspend', description='[OWNER] Suspend or unsuspend a user')
+@app_commands.describe(user_id='The Discord user ID to suspend/unsuspend')
+async def suspend_command(interaction: discord.Interaction, user_id: str):
+    """Suspend or unsuspend a user from using the bot"""
+    logger.info(f"🔒 /suspend command invoked by {interaction.user} (ID: {interaction.user.id})")
+    log_command_usage('suspend', interaction.user.id)
+    
+    # Check if user is owner (soryntech)
+    if interaction.user.id != OWNER_ID:
+        logger.warning(f"⚠️  Unauthorized suspend attempt by {interaction.user}")
+        await interaction.response.send_message("❌ Owner only command", ephemeral=True)
+        return
+    
+    # Parse user ID
+    try:
+        target_user_id = int(user_id)
+    except ValueError:
+        await interaction.response.send_message("❌ Invalid user ID format. Please provide a numeric user ID.", ephemeral=True)
+        return
+    
+    # Check current suspension status
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT username, suspended FROM users WHERE user_id = %s', (target_user_id,))
+        user_data = cur.fetchone()
+        cur.close()
+        return_db_connection(conn)
+        
+        if not user_data:
+            await interaction.response.send_message(f"❌ User ID {target_user_id} not found in database.", ephemeral=True)
+            return
+        
+        username, currently_suspended = user_data
+        new_status = not currently_suspended  # Toggle
+        
+        # Suspend/unsuspend
+        success, message = suspend_user(target_user_id, new_status)
+        
+        if success:
+            status_emoji = "🔒" if new_status else "🔓"
+            status_text = "SUSPENDED" if new_status else "UNSUSPENDED"
+            color = discord.Color.red() if new_status else discord.Color.green()
+            
+            embed = discord.Embed(
+                title=f"{status_emoji} User {status_text}",
+                description=f"User **{username}** (ID: {target_user_id}) has been {status_text.lower()}.",
+                color=color
+            )
+            
+            if new_status:
+                embed.add_field(
+                    name="⚠️ Effect",
+                    value="This user can no longer use the fruit roll tracker commands.",
+                    inline=False
+                )
+            else:
+                embed.add_field(
+                    name="✅ Effect",
+                    value="This user can now use the fruit roll tracker commands again.",
+                    inline=False
+                )
+            
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            logger.info(f"✅ Successfully {status_text.lower()} user {username} (ID: {target_user_id})")
+        else:
+            await interaction.response.send_message(f"❌ Failed to suspend user: {message}", ephemeral=True)
+            
+    except Exception as e:
+        logger.error(f"❌ Error in suspend command: {e}")
+        await interaction.response.send_message(f"❌ An error occurred: {str(e)}", ephemeral=True)
 
 
 # Web server functions
@@ -1707,6 +1944,295 @@ STATS_PAGE = """
 """
 
 
+SUSPENDED_PAGE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SorynTech - Suspended Users</title>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+    <style>
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        body {{
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #0a1929 0%, #1a2f42 50%, #0d3a5c 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #fff;
+            position: relative;
+            overflow-x: hidden;
+        }}
+        .shark-container {{
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 0;
+            overflow: hidden;
+        }}
+        .shark {{
+            position: absolute;
+            font-size: 40px;
+            opacity: 0.15;
+            animation: swim 30s linear infinite;
+        }}
+        .shark:nth-child(2) {{
+            animation-delay: 10s;
+            top: 60%;
+            animation-duration: 40s;
+        }}
+        .shark:nth-child(3) {{
+            animation-delay: 20s;
+            top: 30%;
+            animation-duration: 35s;
+        }}
+        @keyframes swim {{
+            0% {{
+                left: -100px;
+                transform: scaleX(-1);
+            }}
+            100% {{
+                left: calc(100% + 100px);
+                transform: scaleX(-1);
+            }}
+        }}
+        .container {{
+            max-width: 1400px;
+            margin: 0 auto;
+            position: relative;
+            z-index: 1;
+        }}
+        .header {{
+            text-align: center;
+            padding: 40px 20px;
+            background: rgba(13, 58, 92, 0.3);
+            border-radius: 20px;
+            border: 2px solid rgba(220, 38, 38, 0.5);
+            margin-bottom: 30px;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+        }}
+        .header h1 {{
+            font-size: 3em;
+            margin-bottom: 10px;
+            background: linear-gradient(135deg, #dc2626 0%, #ef4444 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }}
+        .supabase-badge {{
+            display: inline-block;
+            margin-top: 10px;
+            padding: 8px 16px;
+            background: rgba(59, 130, 246, 0.2);
+            border-radius: 15px;
+            font-size: 0.9em;
+        }}
+        .stats-section {{
+            background: rgba(13, 58, 92, 0.4);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 30px;
+            margin-bottom: 30px;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+            border: 2px solid rgba(220, 38, 38, 0.3);
+        }}
+        .stat-row {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }}
+        .stat-box {{
+            background: rgba(13, 58, 92, 0.3);
+            border-radius: 10px;
+            padding: 20px;
+            text-align: center;
+            border: 1px solid rgba(220, 38, 38, 0.2);
+        }}
+        .stat-box .icon {{
+            font-size: 2em;
+            margin-bottom: 10px;
+        }}
+        .stat-box .value {{
+            font-size: 2em;
+            font-weight: bold;
+            color: #ef4444;
+        }}
+        .stat-box .label {{
+            font-size: 0.9em;
+            color: #94a3b8;
+            text-transform: uppercase;
+            margin-top: 5px;
+        }}
+        .users-section {{
+            background: rgba(13, 58, 92, 0.4);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 30px;
+            margin-bottom: 30px;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+            border: 2px solid rgba(220, 38, 38, 0.3);
+        }}
+        .section-title {{
+            font-size: 1.5em;
+            margin-bottom: 20px;
+            color: #ef4444;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }}
+        .user-card {{
+            background: rgba(13, 58, 92, 0.3);
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 15px;
+            border: 2px solid rgba(220, 38, 38, 0.2);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: all 0.3s ease;
+        }}
+        .user-card:hover {{
+            border-color: rgba(220, 38, 38, 0.5);
+            transform: translateX(5px);
+        }}
+        .user-info {{
+            flex-grow: 1;
+        }}
+        .user-name {{
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #ef4444;
+            margin-bottom: 5px;
+        }}
+        .user-id {{
+            font-size: 0.9em;
+            color: #94a3b8;
+            font-family: monospace;
+        }}
+        .user-stats {{
+            display: flex;
+            gap: 20px;
+            margin-top: 10px;
+        }}
+        .stat-item {{
+            font-size: 0.85em;
+            color: #cbd5e1;
+        }}
+        .stat-item strong {{
+            color: #06b6d4;
+        }}
+        .suspended-badge {{
+            background: rgba(220, 38, 38, 0.3);
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: bold;
+            color: #ef4444;
+            border: 1px solid rgba(220, 38, 38, 0.5);
+        }}
+        .empty-state {{
+            text-align: center;
+            padding: 60px 20px;
+            opacity: 0.7;
+        }}
+        .empty-state .icon {{
+            font-size: 4em;
+            margin-bottom: 20px;
+        }}
+        .empty-state .text {{
+            font-size: 1.2em;
+            color: #94a3b8;
+        }}
+        .footer {{
+            text-align: center;
+            margin-top: 40px;
+            opacity: 0.8;
+            color: #94a3b8;
+        }}
+        .nav-link {{
+            display: inline-block;
+            margin-top: 20px;
+            padding: 12px 24px;
+            background: rgba(59, 130, 246, 0.3);
+            border-radius: 10px;
+            text-decoration: none;
+            color: #06b6d4;
+            border: 1px solid rgba(59, 130, 246, 0.5);
+            transition: all 0.3s ease;
+        }}
+        .nav-link:hover {{
+            background: rgba(59, 130, 246, 0.5);
+            transform: translateY(-2px);
+        }}
+    </style>
+    <script>
+        setTimeout(function() {{
+            location.reload();
+        }}, 30000);
+    </script>
+</head>
+<body>
+    <div class="shark-container">
+        <div class="shark" style="top: 20%;">🦈</div>
+        <div class="shark" style="top: 60%;">🦈</div>
+        <div class="shark" style="top: 30%;">🦈</div>
+    </div>
+
+    <div class="container">
+        <div class="header">
+            <h1>🦈 SorynTech Bot Suite</h1>
+            <p style="font-size: 1.2em; color: #ef4444;">🔒 Suspended Users</p>
+            <div class="supabase-badge">🗄️ Powered by Supabase</div>
+        </div>
+
+        <div class="stats-section">
+            <div class="stat-row">
+                <div class="stat-box">
+                    <div class="icon">🔒</div>
+                    <div class="value">{suspended_count}</div>
+                    <div class="label">Suspended Users</div>
+                </div>
+                <div class="stat-box">
+                    <div class="icon">👥</div>
+                    <div class="value">{total_users}</div>
+                    <div class="label">Total Users</div>
+                </div>
+                <div class="stat-box">
+                    <div class="icon">📊</div>
+                    <div class="value">{percentage}%</div>
+                    <div class="label">Suspension Rate</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="users-section">
+            <div class="section-title">
+                <span>🔒</span>
+                <span>Suspended User List</span>
+            </div>
+            {users_list}
+        </div>
+
+        <div style="text-align: center;">
+            <a href="/stats" class="nav-link">← Back to Stats Dashboard</a>
+        </div>
+
+        <div class="footer">
+            <p>🦈 SorynTech Bot Suite | 🗄️ Supabase PostgreSQL</p>
+            <p style="margin-top: 10px; font-size: 0.9em;">Auto-refresh every 30 seconds | Last Updated: {current_time}</p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+
 async def handle_health(request):
     """Public health check endpoint"""
     logger.debug("🏥 Health check endpoint accessed")
@@ -1843,6 +2369,82 @@ async def handle_stats(request):
     return web.Response(text=html, content_type='text/html')
 
 
+async def handle_suspended(request):
+    """Protected suspended users page"""
+    logger.debug("🔒 Suspended users page accessed")
+    
+    if not check_auth(request):
+        logger.warning("⚠️  Unauthorized suspended page access attempt")
+        return get_auth_response()
+
+    logger.info("✅ Suspended page access authorized")
+
+    try:
+        # Get all users
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Get suspended users
+        cur.execute('''SELECT user_id, username, total_rolls, last_roll_time, suspended, created_at
+                       FROM users
+                       WHERE suspended = TRUE
+                       ORDER BY username''')
+        suspended_users = cur.fetchall()
+        
+        # Get total user count
+        cur.execute('SELECT COUNT(*) as count FROM users')
+        total_users = cur.fetchone()['count']
+        
+        cur.close()
+        return_db_connection(conn)
+        
+        suspended_count = len(suspended_users)
+        percentage = round((suspended_count / total_users * 100) if total_users > 0 else 0, 1)
+        
+        # Build suspended users HTML
+        if suspended_users:
+            users_html = ""
+            for user in suspended_users:
+                last_roll_date = user['last_roll_time'].strftime('%Y-%m-%d %H:%M UTC') if user['last_roll_time'] else 'Never'
+                created_date = user['created_at'].strftime('%Y-%m-%d') if user['created_at'] else 'Unknown'
+                
+                users_html += f"""
+                <div class="user-card">
+                    <div class="user-info">
+                        <div class="user-name">🔒 {user['username']}</div>
+                        <div class="user-id">User ID: {user['user_id']}</div>
+                        <div class="user-stats">
+                            <div class="stat-item"><strong>Total Rolls:</strong> {user['total_rolls']}</div>
+                            <div class="stat-item"><strong>Last Roll:</strong> {last_roll_date}</div>
+                            <div class="stat-item"><strong>Joined:</strong> {created_date}</div>
+                        </div>
+                    </div>
+                    <div class="suspended-badge">SUSPENDED</div>
+                </div>
+                """
+        else:
+            users_html = """
+            <div class="empty-state">
+                <div class="icon">✅</div>
+                <div class="text">No suspended users! All clear! 🎉</div>
+            </div>
+            """
+        
+        html = SUSPENDED_PAGE.format(
+            suspended_count=suspended_count,
+            total_users=total_users,
+            percentage=percentage,
+            users_list=users_html,
+            current_time=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+        )
+        
+        return web.Response(text=html, content_type='text/html')
+        
+    except Exception as e:
+        logger.error(f"❌ Error in handle_suspended: {e}")
+        return web.Response(text=f"Error loading suspended users: {str(e)}", status=500)
+
+
 async def handle_root(request):
     """Root redirects to health"""
     logger.debug("🌐 Root endpoint accessed")
@@ -1882,6 +2484,7 @@ async def start_web_server():
     app.router.add_get('/', handle_root)
     app.router.add_get('/health', handle_health)
     app.router.add_get('/stats', handle_stats)
+    app.router.add_get('/suspended', handle_suspended)
     app.router.add_get('/favicon.ico', handle_favicon)
 
     port = int(os.getenv('PORT', 10000))
@@ -1893,6 +2496,7 @@ async def start_web_server():
     logger.info(f"✅ Web server started successfully on 0.0.0.0:{port}")
     logger.info(f"🏥 Health check: http://0.0.0.0:{port}/")
     logger.info(f"📊 Stats page: http://0.0.0.0:{port}/stats (Protected)")
+    logger.info(f"🔒 Suspended users: http://0.0.0.0:{port}/suspended (Protected)")
     logger.info("=" * 80)
 
 
