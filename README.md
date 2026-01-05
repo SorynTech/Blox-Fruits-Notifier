@@ -489,22 +489,20 @@ Render free tier spins down after 15 minutes of inactivity. Set up UptimeRobot:
 - No public exposure of sensitive user data
 
 ---
-
+## DONE FEATURES
+- [x] Export roll history to CSV ( Can be done via Supabase)
+---
 ## 📋 Planned Features
-
-### Future Enhancements
 - [ ] Weekly roll statistics per user
 - [ ] Server leaderboards (most rolls, best luck)
-- [x] Export roll history to CSV ( Can be done via Supabase)
+
 - [ ] Custom notification timing (user preference)
 - [ ] Role rewards for milestone rolls (10, 50, 100, etc.)
 - [ ] Streak tracking (consecutive daily rolls)
-- [ ] Trading system integration
-
 ---
 ## WIP
 ---
-- [ ] Integration with other Blox Fruits features
+- [ ] Integration with other Blox Fruits features [Trading system integration]
 ---
 ## 🐛 Troubleshooting
 
