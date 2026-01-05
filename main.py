@@ -82,7 +82,8 @@ logger.info("✅ Bot instance created with prefix '!'")
 
 # Configuration
 OWNER_ID = 447812883158532106
-NOTIFICATION_USERS = [447812883158532106, 778645525499084840, 581677161006497824, 1285269152474464369]
+DAD_USER_ID = 447812883158532106  # Special display name for this user
+NOTIFICATION_USERS = [447812883158532106, 778645525499084840]
 NOTIFICATION_CHANNEL_ID = 1431308135091671132
 ROLL_COOLDOWN_HOURS = 2
 STATS_USER = os.getenv('STATS_USER', 'admin')
@@ -94,6 +95,7 @@ logger.info(f"   - Notification Users: {len(NOTIFICATION_USERS)} users")
 logger.info(f"   - Notification Channel: {NOTIFICATION_CHANNEL_ID}")
 logger.info(f"   - Roll Cooldown: {ROLL_COOLDOWN_HOURS} hours")
 logger.info(f"   - Stats Auth: {STATS_USER}:{'*' * len(STATS_PASS)}")
+logger.info(f"   - Dad User ID: {DAD_USER_ID}")
 
 # Supabase Database Configuration
 SUPABASE_URL = os.getenv('SUPABASE_URL')
@@ -117,6 +119,13 @@ stats = {
 }
 
 logger.info("📊 Statistics tracking initialized")
+
+
+def get_display_name(user_id: int, username: str = None) -> str:
+    """Get display name for user (Dad for special user, otherwise username)"""
+    if user_id == DAD_USER_ID:
+        return "Dad"
+    return username if username else f"User {user_id}"
 
 
 def get_db_connection():
@@ -340,14 +349,15 @@ def log_roll(user_id: int, username: str, fruit_name: str):
     # Get fruit rarity
     fruit_rarity = FRUITS_DATA.get(fruit_name, {}).get('rarity', 'Unknown')
     
-    logger.info(f"🎲 Logging roll: {username} -> {fruit_name} ({fruit_rarity})")
+    display_name = get_display_name(user_id, username)
+    logger.info(f"🎲 Logging roll: {display_name} ({username}) -> {fruit_name} ({fruit_rarity})")
 
     try:
         conn = get_db_connection()
         cur = conn.cursor()
 
         # Update user
-        logger.debug(f"📝 Updating user stats for {username}")
+        logger.debug(f"📝 Updating user stats for {display_name} ({username})")
         cur.execute('''UPDATE users
                        SET total_rolls    = total_rolls + 1,
                            last_roll_time = %s,
@@ -367,7 +377,7 @@ def log_roll(user_id: int, username: str, fruit_name: str):
 
         stats['total_rolls'] += 1
         logger.info(f"✅ Roll logged successfully! Total rolls: {stats['total_rolls']}")
-        logger.info(f"⏰ Next roll for {username}: {next_roll.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        logger.info(f"⏰ Next roll for {display_name}: {next_roll.strftime('%Y-%m-%d %H:%M:%S UTC')}")
     except Exception as e:
         logger.error(f"❌ Error in log_roll: {e}")
         if conn:
@@ -620,7 +630,7 @@ class FruitSelectionView(discord.ui.View):
             logger.info(f"✅ Valid fruit selection: {fruit_name} ({fruit_data['rarity']})")
 
             # Log the roll
-            log_roll(self.user_id, str(interaction.user), fruit_name)
+            log_roll(self.user_id, interaction.user.name, fruit_name)
 
             # Send public message
             channel = interaction.channel
@@ -633,9 +643,12 @@ class FruitSelectionView(discord.ui.View):
             }
             rarity_display = rarity_emoji.get(fruit_data["rarity"], "⚪")
 
+            # Get display name for public message
+            display_name = get_display_name(self.user_id, interaction.user.name)
+
             logger.info(f"📢 Broadcasting roll to channel: {channel.name}")
             await channel.send(
-                f"🎲 <@{self.user_id}> just rolled {rarity_display} **{fruit_name}** {fruit_data['emoji']} ({fruit_data['rarity']})!")
+                f"🎲 **{display_name}** just rolled {rarity_display} **{fruit_name}** {fruit_data['emoji']} ({fruit_data['rarity']})!")
 
             # Update ephemeral message
             next_roll_time = datetime.now(timezone.utc) + timedelta(hours=ROLL_COOLDOWN_HOURS)
@@ -997,11 +1010,12 @@ async def notification_checker():
 
         if user_data['next_roll_time'] and user_data['next_roll_time'] <= now:
             try:
-                logger.info(f"🔔 Sending roll reminder to {user_data['username']} (ID: {user_data['user_id']})")
+                display_name = get_display_name(user_data['user_id'], user_data['username'])
+                logger.info(f"🔔 Sending roll reminder to {display_name} ({user_data['username']}, ID: {user_data['user_id']})")
                 
                 embed = discord.Embed(
                     title="🎲 Fruit Roll Ready!",
-                    description=f"<@{user_data['user_id']}>'s fruit roll cooldown is complete!",
+                    description=f"**{display_name}**'s fruit roll cooldown is complete!",
                     color=discord.Color.gold()
                 )
                 embed.add_field(
@@ -1011,7 +1025,13 @@ async def notification_checker():
                 )
                 embed.set_footer(text="Use /sleep to disable these reminders")
 
-                await channel.send(content=f"<@{user_data['user_id']}>", embed=embed)
+                # Custom message for Dad with hidden ping
+                if user_data['user_id'] == DAD_USER_ID:
+                    mention_text = f"Dad ||<@{user_data['user_id']}>|| Your fruit roll is ready!"
+                else:
+                    mention_text = f"<@{user_data['user_id']}>"
+
+                await channel.send(content=mention_text, embed=embed)
                 notifications_sent += 1
 
                 # Clear next_roll_time so we don't spam
@@ -1026,7 +1046,7 @@ async def notification_checker():
                 except Exception as e:
                     logger.error(f"❌ Error updating next_roll_time: {e}")
 
-                logger.info(f"✅ Sent roll reminder to {user_data['username']}")
+                logger.info(f"✅ Sent roll reminder to {display_name}")
             except Exception as e:
                 logger.error(f"❌ Failed to send reminder to {user_data['user_id']}: {e}")
     
@@ -1059,7 +1079,7 @@ async def fruit_roll(interaction: discord.Interaction):
     user_data = get_user(interaction.user.id)
     if not user_data:
         logger.info("✨ User not found, creating new user entry...")
-        create_or_update_user(interaction.user.id, str(interaction.user))
+        create_or_update_user(interaction.user.id, interaction.user.name)
         user_data = get_user(interaction.user.id)
 
     # Check if user can roll (cooldown)
@@ -1190,7 +1210,7 @@ async def sleep_mode(interaction: discord.Interaction):
 
     user_data = get_user(interaction.user.id)
     if not user_data:
-        create_or_update_user(interaction.user.id, str(interaction.user))
+        create_or_update_user(interaction.user.id, interaction.user.name)
 
     toggle_notifications(interaction.user.id, False)
 
@@ -1217,7 +1237,7 @@ async def awake_mode(interaction: discord.Interaction):
 
     user_data = get_user(interaction.user.id)
     if not user_data:
-        create_or_update_user(interaction.user.id, str(interaction.user))
+        create_or_update_user(interaction.user.id, interaction.user.name)
 
     toggle_notifications(interaction.user.id, True)
 
