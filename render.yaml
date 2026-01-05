@@ -1,0 +1,19 @@
+# Exported from Render on 2026-01-05T14:01:46Z
+version: "1"
+projects:
+- name: Discord Bots
+  environments:
+  - name: Soryn's Bot Suite
+    services:
+    - type: web
+      name: Blox-Fruits-Notifier
+      runtime: python
+      repo: https://github.com/SorynTech/Blox-Fruits-Notifier
+      plan: free
+      envVars:
+      - key: .env
+        sync: false
+      region: frankfurt
+      buildCommand: pip install -r requirements.txt
+      startCommand: python main.py
+      autoDeployTrigger: "off"
