@@ -13,6 +13,7 @@ from psycopg2.pool import SimpleConnectionPool
 from typing import Optional, List, Dict
 import logging
 import sys
+import concurrent.futures
 
 # ============================================================================
 # LOGGING CONFIGURATION - VERBOSE MODE
@@ -108,6 +109,9 @@ else:
 
 # Connection pool for Supabase
 db_pool = None
+
+# Thread pool executor for database operations to prevent event loop blocking
+db_executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
 # Statistics tracking
 stats = {
@@ -290,8 +294,8 @@ def init_database():
 
 
 # Database helper functions
-def get_user(user_id: int) -> Optional[Dict]:
-    """Get user from database"""
+def _get_user_sync(user_id: int) -> Optional[Dict]:
+    """Get user from database - synchronous version"""
     try:
         logger.debug(f"👤 Fetching user data for ID: {user_id}")
         conn = get_db_connection()
@@ -307,8 +311,14 @@ def get_user(user_id: int) -> Optional[Dict]:
         logger.debug(f"⚠️  User not found: {user_id}")
         return None
     except Exception as e:
-        logger.error(f"❌ Error in get_user: {e}")
+        logger.error(f"❌ Error in _get_user_sync: {e}")
         return None
+
+
+async def get_user(user_id: int) -> Optional[Dict]:
+    """Get user from database - async wrapper"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(db_executor, _get_user_sync, user_id)
 
 
 def create_or_update_user(user_id: int, username: str):
@@ -385,8 +395,8 @@ def log_roll(user_id: int, username: str, fruit_name: str):
             return_db_connection(conn)
 
 
-def get_user_rolls(user_id: int) -> List[Dict]:
-    """Get all rolls for a user"""
+def _get_user_rolls_sync(user_id: int) -> List[Dict]:
+    """Get all rolls for a user - synchronous version"""
     try:
         logger.debug(f"📊 Fetching roll history for user ID: {user_id}")
         conn = get_db_connection()
@@ -402,12 +412,18 @@ def get_user_rolls(user_id: int) -> List[Dict]:
         logger.debug(f"✅ Found {len(rows)} rolls for user")
         return [{'fruit': row['fruit_name'], 'time': row['rolled_at']} for row in rows]
     except Exception as e:
-        logger.error(f"❌ Error in get_user_rolls: {e}")
+        logger.error(f"❌ Error in _get_user_rolls_sync: {e}")
         return []
 
 
-def get_all_users() -> List[Dict]:
-    """Get all users from database"""
+async def get_user_rolls(user_id: int) -> List[Dict]:
+    """Get all rolls for a user - async wrapper"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(db_executor, _get_user_rolls_sync, user_id)
+
+
+def _get_all_users_sync() -> List[Dict]:
+    """Get all users from database - synchronous version"""
     try:
         logger.debug("👥 Fetching all users from database")
         conn = get_db_connection()
@@ -426,8 +442,14 @@ def get_all_users() -> List[Dict]:
         logger.debug(f"✅ Fetched {len(rows)} users")
         return [dict(row) for row in rows]
     except Exception as e:
-        logger.error(f"❌ Error in get_all_users: {e}")
+        logger.error(f"❌ Error in _get_all_users_sync: {e}")
         return []
+
+
+async def get_all_users() -> List[Dict]:
+    """Get all users from database - async wrapper"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(db_executor, _get_all_users_sync)
 
 
 def toggle_notifications(user_id: int, enabled: bool):
@@ -506,6 +528,25 @@ def get_rarity_distribution() -> Dict:
     except Exception as e:
         logger.error(f"❌ Error in get_rarity_distribution: {e}")
         return {}
+
+
+def _clear_next_roll_time(user_id: int):
+    """Clear next_roll_time for a user - runs in executor"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('UPDATE users SET next_roll_time = NULL WHERE user_id = %s', (user_id,))
+        conn.commit()
+        cur.close()
+        return_db_connection(conn)
+    except Exception as e:
+        logger.error(f"❌ Error in _clear_next_roll_time: {e}")
+        if 'conn' in locals():
+            try:
+                conn.rollback()
+                return_db_connection(conn)
+            except:
+                pass
 
 
 # Fruit list with rarities (Blox Fruits)
@@ -908,7 +949,7 @@ async def on_ready():
     init_database()
 
     # Update active users count
-    stats['active_users'] = len(get_all_users())
+    stats['active_users'] =  len(await get_all_users())
     logger.info(f"👥 Active users in database: {stats['active_users']}")
 
     # Sync slash commands
@@ -995,7 +1036,8 @@ async def notification_checker():
     """Check for users who need roll reminders"""
     logger.debug("⏰ Notification checker running...")
     now = datetime.now(timezone.utc)
-    users = get_all_users()
+    # CRITICAL FIX: Use await for async function to prevent event loop blocking
+    users = await get_all_users()
 
     # Get notification channel
     channel = bot.get_channel(NOTIFICATION_CHANNEL_ID)
@@ -1044,17 +1086,9 @@ async def notification_checker():
                 await channel.send(content=mention_text, embed=embed)
                 notifications_sent += 1
 
-                # Clear next_roll_time so we don't spam
-                try:
-                    conn = get_db_connection()
-                    cur = conn.cursor()
-                    cur.execute('UPDATE users SET next_roll_time = NULL WHERE user_id = %s',
-                                (user_data['user_id'],))
-                    conn.commit()
-                    cur.close()
-                    return_db_connection(conn)
-                except Exception as e:
-                    logger.error(f"❌ Error updating next_roll_time: {e}")
+                # Clear next_roll_time so we don't spam - run in executor to avoid blocking
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(db_executor, _clear_next_roll_time, user_data['user_id'])
 
                 logger.info(f"✅ Sent roll reminder to {display_name}")
             except Exception as e:
@@ -1086,11 +1120,11 @@ async def fruit_roll(interaction: discord.Interaction):
 
     # Check if user exists, create if not
     logger.debug("👤 Checking if user exists in database...")
-    user_data = get_user(interaction.user.id)
+    user_data = await get_user(interaction.user.id)
     if not user_data:
         logger.info("✨ User not found, creating new user entry...")
         create_or_update_user(interaction.user.id, interaction.user.name)
-        user_data = get_user(interaction.user.id)
+        user_data = await get_user(interaction.user.id)
 
     # Check if user can roll (cooldown)
     if user_data and user_data['next_roll_time']:
@@ -1147,7 +1181,7 @@ async def fruits(interaction: discord.Interaction):
     logger.info(f"📊 /fruits command invoked by {interaction.user} (ID: {interaction.user.id})")
     log_command_usage('fruits', interaction.user.id)
 
-    rolls = get_user_rolls(interaction.user.id)
+    rolls = await get_user_rolls(interaction.user.id)
 
     if not rolls:
         logger.info(f"⚠️  User {interaction.user} has no rolls yet")
@@ -1218,7 +1252,7 @@ async def sleep_mode(interaction: discord.Interaction):
     logger.info(f"💤 /sleep command invoked by {interaction.user} (ID: {interaction.user.id})")
     log_command_usage('sleep', interaction.user.id)
 
-    user_data = get_user(interaction.user.id)
+    user_data = await get_user(interaction.user.id)
     if not user_data:
         create_or_update_user(interaction.user.id, interaction.user.name)
 
@@ -1245,7 +1279,7 @@ async def awake_mode(interaction: discord.Interaction):
     logger.info(f"☀️ /awake command invoked by {interaction.user} (ID: {interaction.user.id})")
     log_command_usage('awake', interaction.user.id)
 
-    user_data = get_user(interaction.user.id)
+    user_data = await get_user(interaction.user.id)
     if not user_data:
         create_or_update_user(interaction.user.id, interaction.user.name)
 
