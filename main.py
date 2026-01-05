@@ -1013,22 +1013,32 @@ async def notification_checker():
                 display_name = get_display_name(user_data['user_id'], user_data['username'])
                 logger.info(f"🔔 Sending roll reminder to {display_name} ({user_data['username']}, ID: {user_data['user_id']})")
                 
-                embed = discord.Embed(
-                    title="🎲 Fruit Roll Ready!",
-                    description=f"**{display_name}**'s fruit roll cooldown is complete!",
-                    color=discord.Color.gold()
-                )
-                embed.add_field(
-                    name="📝 Log Your Roll",
-                    value="Use `/fruit-roll` to log your next fruit roll!",
-                    inline=False
-                )
-                embed.set_footer(text="Use /sleep to disable these reminders")
-
-                # Custom message for Dad with hidden ping
+                # Special embed for Dad
                 if user_data['user_id'] == DAD_USER_ID:
-                    mention_text = f"Dad ||<@{user_data['user_id']}>|| Your fruit roll is ready!"
+                    embed = discord.Embed(
+                        title="🎲 Fruity rolly ready!",
+                        description=f"Daddy's fruit rolly cooldown is all doney woney :3",
+                        color=discord.Color.gold()
+                    )
+                    embed.add_field(
+                        name="📝 Log your rolly",
+                        value="Use `/fruit-roll` to loggy your next fruit roll!",
+                        inline=False
+                    )
+                    embed.set_footer(text="Use /sleep to disable able these reminders tee hee :3c")
+                    mention_text = f"**Blox Fruits Notifier:** Daddy Lucian Your fruit roll is weddy when you are :3c ||<@{user_data['user_id']}>||"
                 else:
+                    embed = discord.Embed(
+                        title="🎲 Fruit Roll Ready!",
+                        description=f"**{display_name}**'s fruit roll cooldown is complete!",
+                        color=discord.Color.gold()
+                    )
+                    embed.add_field(
+                        name="📝 Log Your Roll",
+                        value="Use `/fruit-roll` to log your next fruit roll!",
+                        inline=False
+                    )
+                    embed.set_footer(text="Use /sleep to disable these reminders")
                     mention_text = f"<@{user_data['user_id']}>"
 
                 await channel.send(content=mention_text, embed=embed)
