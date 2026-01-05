@@ -122,9 +122,9 @@ logger.info("📊 Statistics tracking initialized")
 
 
 def get_display_name(user_id: int, username: str = None) -> str:
-    """Get display name for user (Dad for special user, otherwise username)"""
+    """Get display name for user (Daddy for special user, otherwise username)"""
     if user_id == DAD_USER_ID:
-        return "Dad"
+        return "Daddy"
     return username if username else f"User {user_id}"
 
 
