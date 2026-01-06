@@ -97,10 +97,14 @@ logger.info(f"   - Roll Cooldown: {ROLL_COOLDOWN_HOURS} hours")
 logger.info(f"   - Stats Auth: {STATS_USER}:{'*' * len(STATS_PASS)}")
 logger.info(f"   - Dad User ID: {DAD_USER_ID}")
 
-# Ignored user IDs
-IGNORED_ALTS = [1364903422129733654, 1454897720610521251, 1127038223013658694]  # Added to DB but suspended
-IGNORED_BOTS = [1455626479940538533, 1451606115249815663, 443545183997657120, 762217899355013120]  # Completely skipped
-IGNORED_USERS = set(IGNORED_ALTS + IGNORED_BOTS)  # Combined set for reference
+# Ignored user IDs with suspension reasons
+IGNORED_ALTS = {
+    1127038223013658694: "alt of 581677161006497824",
+    1364903422129733654: "alt of 1285269152474464369", 
+    1454897720610521251: "alt of 447812883158532106"
+}
+IGNORED_BOTS = [1455626479940538533, 1451606115249815663, 443545183997657120, 762217899355013120]
+IGNORED_USERS = set(list(IGNORED_ALTS.keys()) + IGNORED_BOTS)
 logger.info(f"   - Alt Accounts (suspended): {len(IGNORED_ALTS)}")
 logger.info(f"   - Bot Accounts (skipped): {len(IGNORED_BOTS)}")
 
@@ -213,6 +217,13 @@ def init_database():
             logger.info("✅ 'suspended' column added/verified")
         except Exception as e:
             logger.debug(f"Suspended column may already exist: {e}")
+        
+        # Add suspension_reason column if it doesn't exist
+        try:
+            cur.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS suspension_reason TEXT')
+            logger.info("✅ 'suspension_reason' column added/verified")
+        except Exception as e:
+            logger.debug(f"Suspension_reason column may already exist: {e}")
 
         # Rolls table - NOW INCLUDES RARITY
         logger.info("📋 Creating 'rolls' table if not exists...")
@@ -523,7 +534,7 @@ def get_rarity_distribution() -> Dict:
 
 
 def sync_guild_members_to_db(guild):
-    """Sync all guild members to database (bots excluded, alts added as suspended)"""
+    """Sync all guild members to database (bots excluded, alts added as suspended with reasons)"""
     logger.info(f"🔄 Syncing members from guild: {guild.name}")
     
     synced_count = 0
@@ -535,8 +546,12 @@ def sync_guild_members_to_db(guild):
             skipped_count += 1
             continue
         
-        # Alts are added but suspended
-        is_alt = member.id in IGNORED_ALTS
+        # Check if member is an alt (and get reason if so)
+        suspension_reason = None
+        is_alt = False
+        if member.id in IGNORED_ALTS:
+            is_alt = True
+            suspension_reason = IGNORED_ALTS[member.id]
         
         try:
             conn = get_db_connection()
@@ -545,13 +560,13 @@ def sync_guild_members_to_db(guild):
             exists = cur.fetchone()
             
             if not exists:
-                # Add user - alts are suspended, regular users are not
-                cur.execute('''INSERT INTO users (user_id, username, total_rolls, notifications_enabled, suspended)
-                               VALUES (%s, %s, 0, TRUE, %s)''', (member.id, member.name, is_alt))
+                # Add user - alts are suspended with reason, regular users are not
+                cur.execute('''INSERT INTO users (user_id, username, total_rolls, notifications_enabled, suspended, suspension_reason)
+                               VALUES (%s, %s, 0, TRUE, %s, %s)''', (member.id, member.name, is_alt, suspension_reason))
                 conn.commit()
                 synced_count += 1
                 if is_alt:
-                    logger.info(f"✨ Added ALT member (suspended): {member.name} (ID: {member.id})")
+                    logger.info(f"✨ Added ALT member (suspended): {member.name} (ID: {member.id}) - Reason: {suspension_reason}")
                 else:
                     logger.info(f"✨ Added new member: {member.name} (ID: {member.id})")
             else:
@@ -573,7 +588,7 @@ def sync_guild_members_to_db(guild):
     return synced_count, skipped_count
 
 
-def suspend_user(user_id: int, suspend: bool = True):
+def suspend_user(user_id: int, suspend: bool = True, reason: str = None):
     """Suspend or unsuspend a user"""
     try:
         conn = get_db_connection()
@@ -587,13 +602,15 @@ def suspend_user(user_id: int, suspend: bool = True):
             return_db_connection(conn)
             return False, "User not found in database"
         
-        cur.execute('UPDATE users SET suspended = %s WHERE user_id = %s', (suspend, user_id))
+        # Update suspended status and reason
+        cur.execute('UPDATE users SET suspended = %s, suspension_reason = %s WHERE user_id = %s', 
+                   (suspend, reason, user_id))
         conn.commit()
         cur.close()
         return_db_connection(conn)
         
         status = "SUSPENDED" if suspend else "UNSUSPENDED"
-        logger.info(f"✅ User {user[0]} (ID: {user_id}) {status}")
+        logger.info(f"✅ User {user[0]} (ID: {user_id}) {status}" + (f" - Reason: {reason}" if reason else ""))
         return True, f"User {user[0]} {status.lower()}"
     except Exception as e:
         logger.error(f"❌ Error in suspend_user: {e}")
@@ -611,7 +628,7 @@ def get_suspended_users():
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute('''SELECT user_id, username, total_rolls, last_roll_time, created_at
+        cur.execute('''SELECT user_id, username, total_rolls, last_roll_time, created_at, suspension_reason
                        FROM users WHERE suspended = TRUE ORDER BY username''')
         rows = cur.fetchall()
         cur.close()
@@ -1425,8 +1442,11 @@ async def stats_link(interaction: discord.Interaction):
 
 
 @bot.tree.command(name='suspend', description='[OWNER] Suspend or unsuspend a user')
-@app_commands.describe(user_id='The Discord user ID to suspend/unsuspend')
-async def suspend_command(interaction: discord.Interaction, user_id: str):
+@app_commands.describe(
+    user_id='The Discord user ID to suspend/unsuspend',
+    reason='Optional reason for suspension'
+)
+async def suspend_command(interaction: discord.Interaction, user_id: str, reason: str = None):
     """Suspend or unsuspend a user from using the bot"""
     logger.info(f"🔒 /suspend command invoked by {interaction.user} (ID: {interaction.user.id})")
     log_command_usage('suspend', interaction.user.id)
@@ -1457,7 +1477,10 @@ async def suspend_command(interaction: discord.Interaction, user_id: str):
         username, currently_suspended = user_data
         new_status = not currently_suspended
         
-        success, message = suspend_user(target_user_id, new_status)
+        # Use provided reason or clear it when unsuspending
+        suspension_reason = reason if new_status else None
+        
+        success, message = suspend_user(target_user_id, new_status, suspension_reason)
         
         if success:
             status_emoji = "🔒" if new_status else "🔓"
@@ -1469,6 +1492,9 @@ async def suspend_command(interaction: discord.Interaction, user_id: str):
                 description=f"User **{username}** (ID: {target_user_id}) has been {status_text.lower()}.",
                 color=color
             )
+            
+            if new_status and suspension_reason:
+                embed.add_field(name="Reason", value=suspension_reason, inline=False)
             
             await interaction.response.send_message(embed=embed, ephemeral=True)
         else:
@@ -2171,6 +2197,7 @@ async def handle_suspended(request):
             for user in suspended_users:
                 last_roll = user['last_roll_time'].strftime('%Y-%m-%d %H:%M UTC') if user['last_roll_time'] else 'Never'
                 created = user['created_at'].strftime('%Y-%m-%d') if user['created_at'] else 'Unknown'
+                reason = user.get('suspension_reason', 'No reason provided')
                 
                 users_html += f"""
                 <div class="user-card">
@@ -2178,6 +2205,9 @@ async def handle_suspended(request):
                     <div class="user-id">User ID: {user['user_id']}</div>
                     <div class="user-stats">
                         Total Rolls: {user['total_rolls']} | Last Roll: {last_roll} | Joined: {created}
+                    </div>
+                    <div style="margin-top: 8px; color: #fbbf24; font-weight: bold;">
+                        Reason: {reason if reason else 'No reason provided'}
                     </div>
                 </div>
                 """
