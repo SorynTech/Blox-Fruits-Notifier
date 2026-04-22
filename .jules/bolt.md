@@ -1,0 +1,3 @@
+## 2026-04-22 - Database Optimization & N+1 Query Resolution
+**Learning:** Found multiple performance bottlenecks in the database layer: N+1 queries in the stats dashboard, lack of batching in guild member sync, and inefficient filtering in the notification loop. Additionally, identified a risk of database connection leaks due to missing `finally` blocks during connection management.
+**Action:** Use PostgreSQL-specific features like `LEFT JOIN LATERAL` and `DISTINCT ON` to resolve N+1 queries. Implement batch operations with `psycopg2.extras.execute_values` and `ANY(%s)` to minimize database roundtrips. Ensure all database interactions are wrapped in `try...finally` to guarantee connection returns to the pool.
