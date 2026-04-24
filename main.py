@@ -13,6 +13,7 @@ from psycopg2.pool import SimpleConnectionPool
 from typing import Optional, List, Dict
 import logging
 import sys
+import html
 
 # ============================================================================
 # LOGGING CONFIGURATION - VERBOSE MODE
@@ -2055,13 +2056,13 @@ async def handle_health(request):
         minutes, _ = divmod(remainder, 60)
         uptime = f"{days}d {hours}h {minutes}m"
 
-    html = HEALTH_PAGE.format(
+    response_html = HEALTH_PAGE.format(
         uptime=uptime,
         total_rolls=stats['total_rolls'],
         active_users=stats['active_users']
     )
 
-    return web.Response(text=html, content_type='text/html')
+    return web.Response(text=response_html, content_type='text/html')
 
 
 async def handle_stats(request):
@@ -2091,7 +2092,7 @@ async def handle_stats(request):
     )
 
     # Build users list HTML
-    users_html = ""
+    users_html_list = []
     for user in users_sorted:
         last_roll = user['last_roll_time']
         next_roll = user['next_roll_time']
@@ -2103,12 +2104,16 @@ async def handle_stats(request):
         next_roll_str = f"<t:{int(next_roll.timestamp())}:R>" if next_roll else "No upcoming roll"
         notif_status = "🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"
 
-        users_html += f"""
+        # Sanitize user-controlled data
+        safe_username = html.escape(str(user['username']))
+        safe_last_fruit = html.escape(str(last_fruit))
+
+        users_html_list.append(f"""
         <div class="user-item">
             <div class="user-info">
-                <div class="user-name">{user['username']}</div>
+                <div class="user-name">{safe_username}</div>
                 <div class="user-stats">
-                    Last Roll: {last_fruit} | Total: {user['total_rolls']} | {notif_status}
+                    Last Roll: {safe_last_fruit} | Total: {user['total_rolls']} | {notif_status}
                 </div>
             </div>
             <div class="next-roll">
@@ -2116,7 +2121,9 @@ async def handle_stats(request):
                 <div>{next_roll_str}</div>
             </div>
         </div>
-        """
+        """)
+
+    users_html = "".join(users_html_list)
 
     if not users_html:
         users_html = "<p style='text-align: center; opacity: 0.7;'>No users have logged rolls yet</p>"
@@ -2166,7 +2173,7 @@ async def handle_stats(request):
         'borderColors': border_colors
     }
 
-    html = STATS_PAGE.format(
+    response_html = STATS_PAGE.format(
         uptime=uptime,
         total_rolls=stats['total_rolls'],
         active_users=len(users),
@@ -2176,7 +2183,7 @@ async def handle_stats(request):
         current_time=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
     )
 
-    return web.Response(text=html, content_type='text/html')
+    return web.Response(text=response_html, content_type='text/html')
 
 
 async def handle_suspended(request):
@@ -2193,33 +2200,38 @@ async def handle_suspended(request):
         suspended_users = get_suspended_users()
         
         if suspended_users:
-            users_html = ""
+            users_html_list = []
             for user in suspended_users:
                 last_roll = user['last_roll_time'].strftime('%Y-%m-%d %H:%M UTC') if user['last_roll_time'] else 'Never'
                 created = user['created_at'].strftime('%Y-%m-%d') if user['created_at'] else 'Unknown'
                 reason = user.get('suspension_reason', 'No reason provided')
                 
-                users_html += f"""
+                # Sanitize user-controlled data
+                safe_username = html.escape(str(user['username']))
+                safe_reason = html.escape(str(reason)) if reason else 'No reason provided'
+
+                users_html_list.append(f"""
                 <div class="user-card">
-                    <div class="user-name">🔒 {user['username']}</div>
+                    <div class="user-name">🔒 {safe_username}</div>
                     <div class="user-id">User ID: {user['user_id']}</div>
                     <div class="user-stats">
                         Total Rolls: {user['total_rolls']} | Last Roll: {last_roll} | Joined: {created}
                     </div>
                     <div style="margin-top: 8px; color: #fbbf24; font-weight: bold;">
-                        Reason: {reason if reason else 'No reason provided'}
+                        Reason: {safe_reason}
                     </div>
                 </div>
-                """
+                """)
+            users_html = "".join(users_html_list)
         else:
             users_html = '<div class="empty">✅ No suspended users! All clear! 🎉</div>'
         
-        html = SUSPENDED_PAGE.format(
+        response_html = SUSPENDED_PAGE.format(
             suspended_count=len(suspended_users),
             users_list=users_html
         )
         
-        return web.Response(text=html, content_type='text/html')
+        return web.Response(text=response_html, content_type='text/html')
     except Exception as e:
         logger.error(f"❌ Error in handle_suspended: {e}")
         return web.Response(text=f"Error: {str(e)}", status=500)
