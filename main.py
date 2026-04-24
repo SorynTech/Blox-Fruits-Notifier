@@ -455,6 +455,68 @@ def get_all_users() -> List[Dict]:
         return []
 
 
+def get_user_count() -> int:
+    """Get total number of users from database"""
+    try:
+        logger.debug("👥 Counting users in database")
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT COUNT(*) FROM users')
+        count = cur.fetchone()[0]
+        cur.close()
+        return_db_connection(conn)
+        return count
+    except Exception as e:
+        logger.error(f"❌ Error in get_user_count: {e}")
+        if 'conn' in locals() and conn:
+            return_db_connection(conn)
+        return 0
+
+
+def get_stats_dashboard_data() -> List[Dict]:
+    """Get users with upcoming rolls and their most recent fruit in a single query"""
+    try:
+        logger.debug("📊 Fetching stats dashboard data with optimized query")
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        # Optimized query to fetch users with upcoming rolls and their latest fruit using LATERAL JOIN
+        # This avoids the N+1 query problem in the stats dashboard
+        query = '''
+            SELECT
+                u.user_id,
+                u.username,
+                u.total_rolls,
+                u.last_roll_time,
+                u.next_roll_time,
+                u.notifications_enabled,
+                r.fruit_name as last_fruit
+            FROM users u
+            LEFT JOIN LATERAL (
+                SELECT fruit_name
+                FROM rolls
+                WHERE user_id = u.user_id
+                ORDER BY rolled_at DESC
+                LIMIT 1
+            ) r ON TRUE
+            WHERE u.next_roll_time IS NOT NULL
+            ORDER BY u.next_roll_time ASC
+        '''
+
+        cur.execute(query)
+        rows = cur.fetchall()
+        cur.close()
+        return_db_connection(conn)
+
+        logger.debug(f"✅ Fetched {len(rows)} users for dashboard")
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"❌ Error in get_stats_dashboard_data: {e}")
+        if 'conn' in locals() and conn:
+            return_db_connection(conn)
+        return []
+
+
 def toggle_notifications(user_id: int, enabled: bool):
     """Toggle notifications for a user"""
     try:
@@ -1048,7 +1110,7 @@ async def on_ready():
     logger.info("=" * 80)
 
     # Update active users count
-    stats['active_users'] = len(get_all_users())
+    stats['active_users'] = get_user_count()
     logger.info(f"👥 Active users in database: {stats['active_users']}")
 
     # Sync slash commands
@@ -2083,27 +2145,18 @@ async def handle_stats(request):
         minutes, _ = divmod(remainder, 60)
         uptime = f"{days}d {hours}h {minutes}m"
 
-    # Get all users sorted by next roll time
-    users = get_all_users()
-    users_sorted = sorted(
-        [u for u in users if u['next_roll_time']],
-        key=lambda x: x['next_roll_time']
-    )
+    # Get users for dashboard using optimized query
+    users_sorted = get_stats_dashboard_data()
 
-    # Build users list HTML
-    users_html = ""
+    # Build users list HTML using O(N) list join instead of += concatenation
+    users_html_list = []
     for user in users_sorted:
-        last_roll = user['last_roll_time']
         next_roll = user['next_roll_time']
-
-        # Get their last fruit
-        rolls = get_user_rolls(user['user_id'])
-        last_fruit = rolls[0]['fruit'] if rolls else "None"
-
+        last_fruit = user['last_fruit'] if user['last_fruit'] else "None"
         next_roll_str = f"<t:{int(next_roll.timestamp())}:R>" if next_roll else "No upcoming roll"
         notif_status = "🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"
 
-        users_html += f"""
+        users_html_list.append(f"""
         <div class="user-item">
             <div class="user-info">
                 <div class="user-name">{user['username']}</div>
@@ -2116,7 +2169,9 @@ async def handle_stats(request):
                 <div>{next_roll_str}</div>
             </div>
         </div>
-        """
+        """)
+
+    users_html = "".join(users_html_list)
 
     if not users_html:
         users_html = "<p style='text-align: center; opacity: 0.7;'>No users have logged rolls yet</p>"
@@ -2169,7 +2224,7 @@ async def handle_stats(request):
     html = STATS_PAGE.format(
         uptime=uptime,
         total_rolls=stats['total_rolls'],
-        active_users=len(users),
+        active_users=get_user_count(),
         guilds_count=stats['guilds_count'],
         users_list=users_html,
         rarity_data=json.dumps(rarity_data),
