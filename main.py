@@ -13,6 +13,9 @@ from psycopg2.pool import SimpleConnectionPool
 from typing import Optional, List, Dict
 import logging
 import sys
+import html
+import secrets
+import base64
 
 # ============================================================================
 # LOGGING CONFIGURATION - VERBOSE MODE
@@ -1511,11 +1514,10 @@ def check_auth(request) -> bool:
     if not auth_header or not auth_header.startswith('Basic '):
         return False
 
-    import base64
     try:
         credentials = base64.b64decode(auth_header[6:]).decode('utf-8')
         username, password = credentials.split(':', 1)
-        return username == STATS_USER and password == STATS_PASS
+        return secrets.compare_digest(username, STATS_USER) and secrets.compare_digest(password, STATS_PASS)
     except:
         return False
 
@@ -2106,9 +2108,9 @@ async def handle_stats(request):
         users_html += f"""
         <div class="user-item">
             <div class="user-info">
-                <div class="user-name">{user['username']}</div>
+                <div class="user-name">{html.escape(user['username'])}</div>
                 <div class="user-stats">
-                    Last Roll: {last_fruit} | Total: {user['total_rolls']} | {notif_status}
+                    Last Roll: {html.escape(last_fruit)} | Total: {user['total_rolls']} | {notif_status}
                 </div>
             </div>
             <div class="next-roll">
@@ -2201,13 +2203,13 @@ async def handle_suspended(request):
                 
                 users_html += f"""
                 <div class="user-card">
-                    <div class="user-name">🔒 {user['username']}</div>
+                    <div class="user-name">🔒 {html.escape(user['username'])}</div>
                     <div class="user-id">User ID: {user['user_id']}</div>
                     <div class="user-stats">
                         Total Rolls: {user['total_rolls']} | Last Roll: {last_roll} | Joined: {created}
                     </div>
                     <div style="margin-top: 8px; color: #fbbf24; font-weight: bold;">
-                        Reason: {reason if reason else 'No reason provided'}
+                        Reason: {html.escape(reason) if reason else 'No reason provided'}
                     </div>
                 </div>
                 """
@@ -2221,8 +2223,8 @@ async def handle_suspended(request):
         
         return web.Response(text=html, content_type='text/html')
     except Exception as e:
-        logger.error(f"❌ Error in handle_suspended: {e}")
-        return web.Response(text=f"Error: {str(e)}", status=500)
+        logger.error(f"❌ Error in handle_suspended: {e}", exc_info=True)
+        return web.Response(text="Internal Server Error", status=500)
 
 
 async def handle_root(request):
