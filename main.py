@@ -317,6 +317,7 @@ def init_database():
 # Database helper functions
 def get_user(user_id: int) -> Optional[Dict]:
     """Get user from database"""
+    conn = None
     try:
         logger.debug(f"👤 Fetching user data for ID: {user_id}")
         conn = get_db_connection()
@@ -324,7 +325,6 @@ def get_user(user_id: int) -> Optional[Dict]:
         cur.execute('SELECT * FROM users WHERE user_id = %s', (user_id,))
         row = cur.fetchone()
         cur.close()
-        return_db_connection(conn)
 
         if row:
             logger.debug(f"✅ User found: {dict(row).get('username')}")
@@ -334,10 +334,14 @@ def get_user(user_id: int) -> Optional[Dict]:
     except Exception as e:
         logger.error(f"❌ Error in get_user: {e}")
         return None
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 
 def create_or_update_user(user_id: int, username: str):
     """Create or update user in database"""
+    conn = None
     try:
         logger.info(f"👤 Creating/updating user: {username} (ID: {user_id})")
         conn = get_db_connection()
@@ -357,12 +361,13 @@ def create_or_update_user(user_id: int, username: str):
 
         conn.commit()
         cur.close()
-        return_db_connection(conn)
         logger.debug(f"✅ User operation complete: {username}")
     except Exception as e:
         logger.error(f"❌ Error in create_or_update_user: {e}")
         if conn:
             conn.rollback()
+    finally:
+        if conn:
             return_db_connection(conn)
 
 
@@ -377,6 +382,7 @@ def log_roll(user_id: int, username: str, fruit_name: str):
     display_name = get_display_name(user_id, username)
     logger.info(f"🎲 Logging roll: {display_name} ({username}) -> {fruit_name} ({fruit_rarity})")
 
+    conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -398,7 +404,6 @@ def log_roll(user_id: int, username: str, fruit_name: str):
 
         conn.commit()
         cur.close()
-        return_db_connection(conn)
 
         stats['total_rolls'] += 1
         logger.info(f"✅ Roll logged successfully! Total rolls: {stats['total_rolls']}")
@@ -407,11 +412,14 @@ def log_roll(user_id: int, username: str, fruit_name: str):
         logger.error(f"❌ Error in log_roll: {e}")
         if conn:
             conn.rollback()
+    finally:
+        if conn:
             return_db_connection(conn)
 
 
 def get_user_rolls(user_id: int) -> List[Dict]:
     """Get all rolls for a user"""
+    conn = None
     try:
         logger.debug(f"📊 Fetching roll history for user ID: {user_id}")
         conn = get_db_connection()
@@ -422,17 +430,20 @@ def get_user_rolls(user_id: int) -> List[Dict]:
                        ORDER BY rolled_at DESC''', (user_id,))
         rows = cur.fetchall()
         cur.close()
-        return_db_connection(conn)
 
         logger.debug(f"✅ Found {len(rows)} rolls for user")
         return [{'fruit': row['fruit_name'], 'time': row['rolled_at']} for row in rows]
     except Exception as e:
         logger.error(f"❌ Error in get_user_rolls: {e}")
         return []
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 
 def get_all_users() -> List[Dict]:
     """Get all users from database"""
+    conn = None
     try:
         logger.debug("👥 Fetching all users from database")
         conn = get_db_connection()
@@ -446,17 +457,68 @@ def get_all_users() -> List[Dict]:
                        FROM users''')
         rows = cur.fetchall()
         cur.close()
-        return_db_connection(conn)
-
-        logger.debug(f"✅ Fetched {len(rows)} users")
         return [dict(row) for row in rows]
     except Exception as e:
         logger.error(f"❌ Error in get_all_users: {e}")
         return []
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+
+def get_user_count() -> int:
+    """Get total count of users efficiently"""
+    conn = None
+    try:
+        logger.debug("👥 Counting users in database")
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT COUNT(*) FROM users')
+        count = cur.fetchone()[0]
+        cur.close()
+        return count
+    except Exception as e:
+        logger.error(f"❌ Error in get_user_count: {e}")
+        return 0
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+
+def get_users_with_last_roll() -> List[Dict]:
+    """Get all users and their most recent fruit roll in a single query to avoid N+1"""
+    conn = None
+    try:
+        logger.debug("👥 Fetching all users with their last roll (batch)")
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        # Using LEFT JOIN LATERAL to efficiently fetch the most recent roll for each user
+        query = """
+            SELECT u.*, r.fruit_name as last_fruit
+            FROM users u
+            LEFT JOIN LATERAL (
+                SELECT fruit_name
+                FROM rolls
+                WHERE user_id = u.user_id
+                ORDER BY rolled_at DESC
+                LIMIT 1
+            ) r ON TRUE
+        """
+        cur.execute(query)
+        rows = cur.fetchall()
+        cur.close()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"❌ Error in get_users_with_last_roll: {e}")
+        return []
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 
 def toggle_notifications(user_id: int, enabled: bool):
     """Toggle notifications for a user"""
+    conn = None
     try:
         status = "ENABLED" if enabled else "DISABLED"
         logger.info(f"🔔 Setting notifications {status} for user ID: {user_id}")
@@ -466,17 +528,19 @@ def toggle_notifications(user_id: int, enabled: bool):
                     (enabled, user_id))
         conn.commit()
         cur.close()
-        return_db_connection(conn)
         logger.debug(f"✅ Notifications toggled successfully")
     except Exception as e:
         logger.error(f"❌ Error in toggle_notifications: {e}")
         if conn:
             conn.rollback()
+    finally:
+        if conn:
             return_db_connection(conn)
 
 
 def log_command_usage(command_name: str, user_id: int):
     """Log command usage for statistics"""
+    conn = None
     try:
         logger.debug(f"📊 Logging command usage: /{command_name} by user {user_id}")
         conn = get_db_connection()
@@ -485,7 +549,6 @@ def log_command_usage(command_name: str, user_id: int):
                     (command_name, user_id))
         conn.commit()
         cur.close()
-        return_db_connection(conn)
 
         if command_name not in stats['command_usage']:
             stats['command_usage'][command_name] = 0
@@ -495,11 +558,14 @@ def log_command_usage(command_name: str, user_id: int):
         logger.error(f"❌ Error in log_command_usage: {e}")
         if conn:
             conn.rollback()
+    finally:
+        if conn:
             return_db_connection(conn)
 
 
 def get_rarity_distribution() -> Dict:
     """Get distribution of fruit rarities rolled"""
+    conn = None
     try:
         logger.debug("📊 Fetching rarity distribution")
         conn = get_db_connection()
@@ -525,12 +591,14 @@ def get_rarity_distribution() -> Dict:
             rarity_data[row[0]] = row[1]
 
         cur.close()
-        return_db_connection(conn)
         logger.debug(f"✅ Rarity distribution: {rarity_data}")
         return rarity_data
     except Exception as e:
         logger.error(f"❌ Error in get_rarity_distribution: {e}")
         return {}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 
 def sync_guild_members_to_db(guild):
@@ -553,6 +621,7 @@ def sync_guild_members_to_db(guild):
             is_alt = True
             suspension_reason = IGNORED_ALTS[member.id]
         
+        conn = None
         try:
             conn = get_db_connection()
             cur = conn.cursor()
@@ -574,15 +643,13 @@ def sync_guild_members_to_db(guild):
                 conn.commit()
             
             cur.close()
-            return_db_connection(conn)
         except Exception as e:
             logger.error(f"❌ Error syncing member {member.name}: {e}")
-            if 'conn' in locals():
-                try:
-                    conn.rollback()
-                    return_db_connection(conn)
-                except:
-                    pass
+            if conn:
+                conn.rollback()
+        finally:
+            if conn:
+                return_db_connection(conn)
     
     logger.info(f"✅ Member sync complete: {synced_count} added, {skipped_count} skipped (bots)")
     return synced_count, skipped_count
@@ -590,6 +657,7 @@ def sync_guild_members_to_db(guild):
 
 def suspend_user(user_id: int, suspend: bool = True, reason: str = None):
     """Suspend or unsuspend a user"""
+    conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -599,7 +667,6 @@ def suspend_user(user_id: int, suspend: bool = True, reason: str = None):
         
         if not user:
             cur.close()
-            return_db_connection(conn)
             return False, "User not found in database"
         
         # Update suspended status and reason
@@ -607,24 +674,23 @@ def suspend_user(user_id: int, suspend: bool = True, reason: str = None):
                    (suspend, reason, user_id))
         conn.commit()
         cur.close()
-        return_db_connection(conn)
         
         status = "SUSPENDED" if suspend else "UNSUSPENDED"
         logger.info(f"✅ User {user[0]} (ID: {user_id}) {status}" + (f" - Reason: {reason}" if reason else ""))
         return True, f"User {user[0]} {status.lower()}"
     except Exception as e:
         logger.error(f"❌ Error in suspend_user: {e}")
-        if 'conn' in locals():
-            try:
-                conn.rollback()
-                return_db_connection(conn)
-            except:
-                pass
+        if conn:
+            conn.rollback()
         return False, f"Error: {str(e)}"
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 
 def get_suspended_users():
     """Get all suspended users"""
+    conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -632,11 +698,13 @@ def get_suspended_users():
                        FROM users WHERE suspended = TRUE ORDER BY username''')
         rows = cur.fetchall()
         cur.close()
-        return_db_connection(conn)
         return [dict(row) for row in rows]
     except Exception as e:
         logger.error(f"❌ Error getting suspended users: {e}")
         return []
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 
 # Fruit list with rarities (Blox Fruits)
@@ -1048,7 +1116,7 @@ async def on_ready():
     logger.info("=" * 80)
 
     # Update active users count
-    stats['active_users'] = len(get_all_users())
+    stats['active_users'] = get_user_count()
     logger.info(f"👥 Active users in database: {stats['active_users']}")
 
     # Sync slash commands
@@ -1185,6 +1253,7 @@ async def notification_checker():
                 notifications_sent += 1
 
                 # Clear next_roll_time so we don't spam
+                conn = None
                 try:
                     conn = get_db_connection()
                     cur = conn.cursor()
@@ -1192,9 +1261,13 @@ async def notification_checker():
                                 (user_data['user_id'],))
                     conn.commit()
                     cur.close()
-                    return_db_connection(conn)
                 except Exception as e:
                     logger.error(f"❌ Error updating next_roll_time: {e}")
+                    if conn:
+                        conn.rollback()
+                finally:
+                    if conn:
+                        return_db_connection(conn)
 
                 logger.info(f"✅ Sent roll reminder to {display_name}")
             except Exception as e:
@@ -2083,40 +2156,32 @@ async def handle_stats(request):
         minutes, _ = divmod(remainder, 60)
         uptime = f"{days}d {hours}h {minutes}m"
 
-    # Get all users sorted by next roll time
-    users = get_all_users()
+    # Get all users with their last roll in one query to avoid N+1 problem
+    users = get_users_with_last_roll()
+
+    # Filter and sort users with upcoming rolls
     users_sorted = sorted(
         [u for u in users if u['next_roll_time']],
         key=lambda x: x['next_roll_time']
     )
 
-    # Build users list HTML
-    users_html = ""
-    for user in users_sorted:
-        last_roll = user['last_roll_time']
-        next_roll = user['next_roll_time']
-
-        # Get their last fruit
-        rolls = get_user_rolls(user['user_id'])
-        last_fruit = rolls[0]['fruit'] if rolls else "None"
-
-        next_roll_str = f"<t:{int(next_roll.timestamp())}:R>" if next_roll else "No upcoming roll"
-        notif_status = "🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"
-
-        users_html += f"""
+    # Build users list HTML using join for better performance
+    users_html = "".join([
+        f"""
         <div class="user-item">
             <div class="user-info">
                 <div class="user-name">{user['username']}</div>
                 <div class="user-stats">
-                    Last Roll: {last_fruit} | Total: {user['total_rolls']} | {notif_status}
+                    Last Roll: {user.get('last_fruit') or 'None'} | Total: {user['total_rolls']} | {"🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"}
                 </div>
             </div>
             <div class="next-roll">
                 <div style="font-weight: bold;">Next Roll</div>
-                <div>{next_roll_str}</div>
+                <div><t:{int(user['next_roll_time'].timestamp())}:R></div>
             </div>
         </div>
-        """
+        """ for user in users_sorted
+    ])
 
     if not users_html:
         users_html = "<p style='text-align: center; opacity: 0.7;'>No users have logged rolls yet</p>"

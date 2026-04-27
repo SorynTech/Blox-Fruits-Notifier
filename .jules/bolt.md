@@ -1,0 +1,3 @@
+## 2024-05-22 - Optimized database access and resolved N+1 query in stats page
+**Learning:** The stats page was suffering from an N+1 query problem where it fetched all users and then made a separate database call for each user to get their last roll. This scales poorly as the user base grows. Additionally, using `len(get_all_users())` for simple counts is inefficient when the table is large.
+**Action:** Use `LEFT JOIN LATERAL` to fetch related records in a single batch query. Implement dedicated `COUNT(*)` helpers for metadata. Always use `try...finally` blocks with connection pools to ensure resources are returned even if errors occur.
