@@ -455,6 +455,47 @@ def get_all_users() -> List[Dict]:
         return []
 
 
+def get_users_with_last_roll() -> List[Dict]:
+    """
+    Get all users along with their most recent fruit roll in a single query.
+    Optimized to avoid N+1 query problems in the dashboard.
+    """
+    try:
+        logger.debug("👥 Fetching all users with their last roll (Optimized O(1) query)")
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        # Using LEFT JOIN LATERAL to efficiently fetch the most recent roll for each user
+        query = '''
+            SELECT u.user_id,
+                   u.username,
+                   u.total_rolls,
+                   u.last_roll_time,
+                   u.next_roll_time,
+                   u.notifications_enabled,
+                   r.fruit_name as last_fruit
+            FROM users u
+            LEFT JOIN LATERAL (
+                SELECT fruit_name
+                FROM rolls
+                WHERE user_id = u.user_id
+                ORDER BY rolled_at DESC
+                LIMIT 1
+            ) r ON TRUE
+        '''
+
+        cur.execute(query)
+        rows = cur.fetchall()
+        cur.close()
+        return_db_connection(conn)
+
+        logger.debug(f"✅ Fetched {len(rows)} users with their last roll data")
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"❌ Error in get_users_with_last_roll: {e}")
+        return []
+
+
 def toggle_notifications(user_id: int, enabled: bool):
     """Toggle notifications for a user"""
     try:
@@ -2083,8 +2124,9 @@ async def handle_stats(request):
         minutes, _ = divmod(remainder, 60)
         uptime = f"{days}d {hours}h {minutes}m"
 
-    # Get all users sorted by next roll time
-    users = get_all_users()
+    # Get all users with their last roll data, sorted by next roll time
+    # Optimized: uses a single query instead of N+1 queries
+    users = get_users_with_last_roll()
     users_sorted = sorted(
         [u for u in users if u['next_roll_time']],
         key=lambda x: x['next_roll_time']
@@ -2096,9 +2138,8 @@ async def handle_stats(request):
         last_roll = user['last_roll_time']
         next_roll = user['next_roll_time']
 
-        # Get their last fruit
-        rolls = get_user_rolls(user['user_id'])
-        last_fruit = rolls[0]['fruit'] if rolls else "None"
+        # Get their last fruit from the optimized query result
+        last_fruit = user.get('last_fruit') or "None"
 
         next_roll_str = f"<t:{int(next_roll.timestamp())}:R>" if next_roll else "No upcoming roll"
         notif_status = "🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"
