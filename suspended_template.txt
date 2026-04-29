@@ -1,0 +1,113 @@
+
+SUSPENDED_PAGE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SorynTech - Suspended Users</title>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #0a1929 0%, #1a2f42 50%, #0d3a5c 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #fff;
+            position: relative;
+            overflow-x: hidden;
+        }}
+        .shark-container {{
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 0;
+            overflow: hidden;
+        }}
+        .shark {{
+            position: absolute;
+            font-size: 40px;
+            opacity: 0.15;
+            animation: swim 30s linear infinite;
+        }}
+        .shark:nth-child(2) {{
+            animation-delay: 10s;
+            top: 60%;
+            animation-duration: 40s;
+        }}
+        .shark:nth-child(3) {{
+            animation-delay: 20s;
+            top: 30%;
+            animation-duration: 35s;
+        }}
+        @keyframes swim {{
+            0% {{ left: -100px; transform: scaleX(-1); }}
+            100% {{ left: calc(100% + 100px); transform: scaleX(-1); }}
+        }}
+        .container {{ max-width: 1400px; margin: 0 auto; position: relative; z-index: 1; }}
+        .header {{
+            text-align: center;
+            padding: 40px 20px;
+            background: rgba(13, 58, 92, 0.3);
+            border-radius: 20px;
+            border: 2px solid rgba(220, 38, 38, 0.5);
+            margin-bottom: 30px;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+        }}
+        .header h1 {{
+            font-size: 3em;
+            margin-bottom: 10px;
+            background: linear-gradient(135deg, #dc2626 0%, #ef4444 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }}
+        .stats-box {{
+            background: rgba(13, 58, 92, 0.4);
+            padding: 20px;
+            border-radius: 15px;
+            margin-bottom: 30px;
+            text-align: center;
+        }}
+        .user-card {{
+            background: rgba(13, 58, 92, 0.3);
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 15px;
+            border: 2px solid rgba(220, 38, 38, 0.2);
+        }}
+        .user-name {{ font-size: 1.2em; font-weight: bold; color: #ef4444; margin-bottom: 5px; }}
+        .user-id {{ font-size: 0.9em; color: #94a3b8; font-family: monospace; }}
+        .user-stats {{ margin-top: 10px; font-size: 0.9em; color: #cbd5e1; }}
+        .empty {{ text-align: center; padding: 40px; opacity: 0.7; }}
+        .nav-link {{
+            display: inline-block;
+            margin-top: 20px;
+            padding: 12px 24px;
+            background: rgba(59, 130, 246, 0.3);
+            border-radius: 10px;
+            text-decoration: none;
+            color: #06b6d4;
+            border: 1px solid rgba(59, 130, 246, 0.5);
+        }}
+    </style>
+</head>
+<body>
+    <div class="shark-container">
+        <div class="shark" style="top: 20%;">🦈</div>
+        <div class="shark" style="top: 60%;">🦈</div>
+        <div class="shark" style="top: 30%;">🦈</div>
+    </div>
+
+    <div class="container">
+        <div class="header">
+            <h1>🦈 SorynTech Bot Suite</h1>
+            <p style="font-size: 1.2em; color: #ef4444;">🔒 Suspended Users</p>
+        </div>
+
+        <div class="stats-box">
+            <h2 style="color: #ef4444;">Suspended: {suspended_count}</h2>
+        </div>
