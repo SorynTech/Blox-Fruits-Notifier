@@ -354,6 +354,7 @@ def create_or_update_user(user_id: int, username: str):
             logger.info(f"✨ Creating new user: {username}")
             cur.execute('''INSERT INTO users (user_id, username, total_rolls, notifications_enabled)
                            VALUES (%s, %s, 0, TRUE)''', (user_id, username))
+            stats['active_users'] += 1
 
         conn.commit()
         cur.close()
@@ -452,6 +453,71 @@ def get_all_users() -> List[Dict]:
         return [dict(row) for row in rows]
     except Exception as e:
         logger.error(f"❌ Error in get_all_users: {e}")
+        return []
+
+
+def get_user_count() -> int:
+    """Get the total number of users (efficiently)"""
+    try:
+        logger.debug("👥 Fetching total user count")
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT COUNT(*) FROM users')
+        count = cur.fetchone()[0]
+        cur.close()
+        return_db_connection(conn)
+        return count
+    except Exception as e:
+        logger.error(f"❌ Error in get_user_count: {e}")
+        return 0
+
+
+def get_total_roll_count() -> int:
+    """Get the total number of rolls (efficiently)"""
+    try:
+        logger.debug("🎲 Fetching total roll count")
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT COUNT(*) FROM rolls')
+        count = cur.fetchone()[0]
+        cur.close()
+        return_db_connection(conn)
+        return count
+    except Exception as e:
+        logger.error(f"❌ Error in get_total_roll_count: {e}")
+        return 0
+
+
+def get_users_with_last_roll() -> List[Dict]:
+    """Get all users with their most recent fruit roll in a single query (solves N+1)"""
+    try:
+        logger.debug("👥 Fetching users with their latest rolls")
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        # Using LEFT JOIN LATERAL to efficiently get the most recent roll for each user
+        query = '''
+            SELECT u.user_id, u.username, u.total_rolls, u.last_roll_time,
+                   u.next_roll_time, u.notifications_enabled, r.fruit_name as last_fruit
+            FROM users u
+            LEFT JOIN LATERAL (
+                SELECT fruit_name
+                FROM rolls
+                WHERE user_id = u.user_id
+                ORDER BY rolled_at DESC
+                LIMIT 1
+            ) r ON TRUE
+        '''
+
+        cur.execute(query)
+        rows = cur.fetchall()
+        cur.close()
+        return_db_connection(conn)
+
+        logger.debug(f"✅ Fetched {len(rows)} users with latest rolls")
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"❌ Error in get_users_with_last_roll: {e}")
         return []
 
 
@@ -565,6 +631,7 @@ def sync_guild_members_to_db(guild):
                                VALUES (%s, %s, 0, TRUE, %s, %s)''', (member.id, member.name, is_alt, suspension_reason))
                 conn.commit()
                 synced_count += 1
+                stats['active_users'] += 1
                 if is_alt:
                     logger.info(f"✨ Added ALT member (suspended): {member.name} (ID: {member.id}) - Reason: {suspension_reason}")
                 else:
@@ -1047,9 +1114,11 @@ async def on_ready():
     logger.info("✅ Member sync complete")
     logger.info("=" * 80)
 
-    # Update active users count
-    stats['active_users'] = len(get_all_users())
+    # Update active users and total rolls count (efficiently)
+    stats['active_users'] = get_user_count()
+    stats['total_rolls'] = get_total_roll_count()
     logger.info(f"👥 Active users in database: {stats['active_users']}")
+    logger.info(f"🎲 Total rolls in database: {stats['total_rolls']}")
 
     # Sync slash commands
     logger.info("🔄 Syncing slash commands with Discord...")
@@ -2083,27 +2152,22 @@ async def handle_stats(request):
         minutes, _ = divmod(remainder, 60)
         uptime = f"{days}d {hours}h {minutes}m"
 
-    # Get all users sorted by next roll time
-    users = get_all_users()
+    # Get all users with their last roll in a single query (solves N+1 problem)
+    users = get_users_with_last_roll()
     users_sorted = sorted(
         [u for u in users if u['next_roll_time']],
         key=lambda x: x['next_roll_time']
     )
 
-    # Build users list HTML
-    users_html = ""
+    # Build users list HTML efficiently
+    users_html_list = []
     for user in users_sorted:
-        last_roll = user['last_roll_time']
         next_roll = user['next_roll_time']
-
-        # Get their last fruit
-        rolls = get_user_rolls(user['user_id'])
-        last_fruit = rolls[0]['fruit'] if rolls else "None"
-
-        next_roll_str = f"<t:{int(next_roll.timestamp())}:R>" if next_roll else "No upcoming roll"
+        last_fruit = user.get('last_fruit') or "None"
+        next_roll_str = f"<t:{int(next_roll.timestamp())}:R>"
         notif_status = "🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"
 
-        users_html += f"""
+        users_html_list.append(f"""
         <div class="user-item">
             <div class="user-info">
                 <div class="user-name">{user['username']}</div>
@@ -2116,10 +2180,9 @@ async def handle_stats(request):
                 <div>{next_roll_str}</div>
             </div>
         </div>
-        """
+        """)
 
-    if not users_html:
-        users_html = "<p style='text-align: center; opacity: 0.7;'>No users have logged rolls yet</p>"
+    users_html = "".join(users_html_list) if users_html_list else "<p style='text-align: center; opacity: 0.7;'>No users have upcoming rolls yet</p>"
 
     # Get rarity distribution data
     rarity_dist = get_rarity_distribution()
