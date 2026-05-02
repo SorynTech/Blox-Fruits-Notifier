@@ -433,6 +433,7 @@ def get_user_rolls(user_id: int) -> List[Dict]:
 
 def get_all_users() -> List[Dict]:
     """Get all users from database"""
+    conn = None
     try:
         logger.debug("👥 Fetching all users from database")
         conn = get_db_connection()
@@ -446,13 +447,52 @@ def get_all_users() -> List[Dict]:
                        FROM users''')
         rows = cur.fetchall()
         cur.close()
-        return_db_connection(conn)
 
         logger.debug(f"✅ Fetched {len(rows)} users")
         return [dict(row) for row in rows]
     except Exception as e:
         logger.error(f"❌ Error in get_all_users: {e}")
         return []
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+
+def get_users_with_last_fruit() -> List[Dict]:
+    """Get all users and their latest rolled fruit in a single optimized query (Avoids N+1)"""
+    conn = None
+    try:
+        logger.debug("👥 Fetching users with their latest fruit (Optimized)")
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        # Using LEFT JOIN LATERAL to fetch the latest roll for each user efficiently
+        cur.execute('''
+            SELECT u.user_id,
+                   u.username,
+                   u.total_rolls,
+                   u.last_roll_time,
+                   u.next_roll_time,
+                   u.notifications_enabled,
+                   r.fruit_name as last_fruit
+            FROM users u
+            LEFT JOIN LATERAL (
+                SELECT fruit_name
+                FROM rolls
+                WHERE user_id = u.user_id
+                ORDER BY rolled_at DESC
+                LIMIT 1
+            ) r ON TRUE
+        ''')
+        rows = cur.fetchall()
+        cur.close()
+        logger.debug(f"✅ Fetched {len(rows)} users with fruit data")
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"❌ Error in get_users_with_last_fruit: {e}")
+        return []
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 
 def toggle_notifications(user_id: int, enabled: bool):
@@ -2083,40 +2123,31 @@ async def handle_stats(request):
         minutes, _ = divmod(remainder, 60)
         uptime = f"{days}d {hours}h {minutes}m"
 
-    # Get all users sorted by next roll time
-    users = get_all_users()
+    # Get all users and their last fruit in one optimized query
+    users = get_users_with_last_fruit()
     users_sorted = sorted(
         [u for u in users if u['next_roll_time']],
         key=lambda x: x['next_roll_time']
     )
 
-    # Build users list HTML
-    users_html = ""
-    for user in users_sorted:
-        last_roll = user['last_roll_time']
-        next_roll = user['next_roll_time']
-
-        # Get their last fruit
-        rolls = get_user_rolls(user['user_id'])
-        last_fruit = rolls[0]['fruit'] if rolls else "None"
-
-        next_roll_str = f"<t:{int(next_roll.timestamp())}:R>" if next_roll else "No upcoming roll"
-        notif_status = "🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"
-
-        users_html += f"""
+    # Build users list HTML using "".join() for better performance O(N)
+    users_html = "".join([
+        f"""
         <div class="user-item">
             <div class="user-info">
                 <div class="user-name">{user['username']}</div>
                 <div class="user-stats">
-                    Last Roll: {last_fruit} | Total: {user['total_rolls']} | {notif_status}
+                    Last Roll: {user['last_fruit'] or "None"} | Total: {user['total_rolls']} | {"🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"}
                 </div>
             </div>
             <div class="next-roll">
                 <div style="font-weight: bold;">Next Roll</div>
-                <div>{next_roll_str}</div>
+                <div><t:{int(user['next_roll_time'].timestamp())}:R></div>
             </div>
         </div>
         """
+        for user in users_sorted
+    ])
 
     if not users_html:
         users_html = "<p style='text-align: center; opacity: 0.7;'>No users have logged rolls yet</p>"
