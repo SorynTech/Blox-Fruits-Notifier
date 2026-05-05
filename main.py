@@ -455,6 +455,67 @@ def get_all_users() -> List[Dict]:
         return []
 
 
+def get_users_with_last_fruit() -> List[Dict]:
+    """Get all users with their most recent fruit roll using an efficient batch query"""
+    try:
+        logger.debug("👥 Fetching users with their last fruit roll (batch query)")
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        # ⚡ Bolt: Using LEFT JOIN LATERAL to get the latest roll for each user in one trip (O(1) round trips vs O(N))
+        cur.execute('''
+            SELECT u.user_id, u.username, u.total_rolls, u.last_roll_time,
+                   u.next_roll_time, u.notifications_enabled, r.fruit_name as last_fruit
+            FROM users u
+            LEFT JOIN LATERAL (
+                SELECT fruit_name
+                FROM rolls
+                WHERE user_id = u.user_id
+                ORDER BY rolled_at DESC
+                LIMIT 1
+            ) r ON true
+        ''')
+        rows = cur.fetchall()
+        cur.close()
+        return_db_connection(conn)
+        logger.debug(f"✅ Fetched {len(rows)} users with roll data")
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"❌ Error in get_users_with_last_fruit: {e}")
+        return []
+
+
+def get_active_users_count() -> int:
+    """Get the total number of users in the database efficiently"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        # ⚡ Bolt: Using COUNT(*) is significantly faster than fetching all records and using len()
+        cur.execute('SELECT COUNT(*) FROM users')
+        count = cur.fetchone()[0]
+        cur.close()
+        return_db_connection(conn)
+        return count
+    except Exception as e:
+        logger.error(f"❌ Error in get_active_users_count: {e}")
+        return 0
+
+
+def get_total_rolls_count() -> int:
+    """Get the total number of rolls in the database efficiently"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        # ⚡ Bolt: Using COUNT(*) is significantly faster than fetching all records and using len()
+        cur.execute('SELECT COUNT(*) FROM rolls')
+        count = cur.fetchone()[0]
+        cur.close()
+        return_db_connection(conn)
+        return count
+    except Exception as e:
+        logger.error(f"❌ Error in get_total_rolls_count: {e}")
+        return 0
+
+
 def toggle_notifications(user_id: int, enabled: bool):
     """Toggle notifications for a user"""
     try:
@@ -1047,9 +1108,11 @@ async def on_ready():
     logger.info("✅ Member sync complete")
     logger.info("=" * 80)
 
-    # Update active users count
-    stats['active_users'] = len(get_all_users())
+    # ⚡ Bolt: Efficiently initialize global stats with COUNT(*) queries
+    stats['active_users'] = get_active_users_count()
+    stats['total_rolls'] = get_total_rolls_count()
     logger.info(f"👥 Active users in database: {stats['active_users']}")
+    logger.info(f"🎲 Total rolls in database: {stats['total_rolls']}")
 
     # Sync slash commands
     logger.info("🔄 Syncing slash commands with Discord...")
@@ -2083,27 +2146,24 @@ async def handle_stats(request):
         minutes, _ = divmod(remainder, 60)
         uptime = f"{days}d {hours}h {minutes}m"
 
-    # Get all users sorted by next roll time
-    users = get_all_users()
+    # ⚡ Bolt: Using get_users_with_last_fruit() to fetch all needed data in one query (Eliminates N+1 query problem)
+    users = get_users_with_last_fruit()
     users_sorted = sorted(
         [u for u in users if u['next_roll_time']],
         key=lambda x: x['next_roll_time']
     )
 
     # Build users list HTML
-    users_html = ""
+    # ⚡ Bolt: Using "".join() with a list comprehension is more efficient than += in a loop
+    users_html_list = []
     for user in users_sorted:
-        last_roll = user['last_roll_time']
         next_roll = user['next_roll_time']
-
-        # Get their last fruit
-        rolls = get_user_rolls(user['user_id'])
-        last_fruit = rolls[0]['fruit'] if rolls else "None"
+        last_fruit = user.get('last_fruit') or "None"
 
         next_roll_str = f"<t:{int(next_roll.timestamp())}:R>" if next_roll else "No upcoming roll"
         notif_status = "🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"
 
-        users_html += f"""
+        users_html_list.append(f"""
         <div class="user-item">
             <div class="user-info">
                 <div class="user-name">{user['username']}</div>
@@ -2116,8 +2176,9 @@ async def handle_stats(request):
                 <div>{next_roll_str}</div>
             </div>
         </div>
-        """
+        """)
 
+    users_html = "".join(users_html_list)
     if not users_html:
         users_html = "<p style='text-align: center; opacity: 0.7;'>No users have logged rolls yet</p>"
 
