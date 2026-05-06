@@ -13,6 +13,7 @@ from psycopg2.pool import SimpleConnectionPool
 from typing import Optional, List, Dict
 import logging
 import sys
+import html
 
 # ============================================================================
 # LOGGING CONFIGURATION - VERBOSE MODE
@@ -2106,9 +2107,9 @@ async def handle_stats(request):
         users_html += f"""
         <div class="user-item">
             <div class="user-info">
-                <div class="user-name">{user['username']}</div>
+                <div class="user-name">{html.escape(user['username'])}</div>
                 <div class="user-stats">
-                    Last Roll: {last_fruit} | Total: {user['total_rolls']} | {notif_status}
+                    Last Roll: {html.escape(last_fruit)} | Total: {user['total_rolls']} | {notif_status}
                 </div>
             </div>
             <div class="next-roll">
@@ -2201,13 +2202,13 @@ async def handle_suspended(request):
                 
                 users_html += f"""
                 <div class="user-card">
-                    <div class="user-name">🔒 {user['username']}</div>
+                    <div class="user-name">🔒 {html.escape(user['username'])}</div>
                     <div class="user-id">User ID: {user['user_id']}</div>
                     <div class="user-stats">
                         Total Rolls: {user['total_rolls']} | Last Roll: {last_roll} | Joined: {created}
                     </div>
                     <div style="margin-top: 8px; color: #fbbf24; font-weight: bold;">
-                        Reason: {reason if reason else 'No reason provided'}
+                        Reason: {html.escape(reason) if reason else 'No reason provided'}
                     </div>
                 </div>
                 """
