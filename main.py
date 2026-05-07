@@ -13,6 +13,9 @@ from psycopg2.pool import SimpleConnectionPool
 from typing import Optional, List, Dict
 import logging
 import sys
+import html
+import secrets
+import base64
 
 # ============================================================================
 # LOGGING CONFIGURATION - VERBOSE MODE
@@ -1511,11 +1514,10 @@ def check_auth(request) -> bool:
     if not auth_header or not auth_header.startswith('Basic '):
         return False
 
-    import base64
     try:
         credentials = base64.b64decode(auth_header[6:]).decode('utf-8')
         username, password = credentials.split(':', 1)
-        return username == STATS_USER and password == STATS_PASS
+        return secrets.compare_digest(username, STATS_USER) and secrets.compare_digest(password, STATS_PASS)
     except:
         return False
 
@@ -2046,137 +2048,143 @@ SUSPENDED_PAGE = """
 async def handle_health(request):
     """Public health check endpoint"""
     logger.debug("🏥 Health check endpoint accessed")
-    
-    uptime = "Not started"
-    if stats['bot_start_time']:
-        delta = datetime.now(timezone.utc) - stats['bot_start_time']
-        days = delta.days
-        hours, remainder = divmod(delta.seconds, 3600)
-        minutes, _ = divmod(remainder, 60)
-        uptime = f"{days}d {hours}h {minutes}m"
+    try:
+        uptime = "Not started"
+        if stats['bot_start_time']:
+            delta = datetime.now(timezone.utc) - stats['bot_start_time']
+            days = delta.days
+            hours, remainder = divmod(delta.seconds, 3600)
+            minutes, _ = divmod(remainder, 60)
+            uptime = f"{days}d {hours}h {minutes}m"
 
-    html = HEALTH_PAGE.format(
-        uptime=uptime,
-        total_rolls=stats['total_rolls'],
-        active_users=stats['active_users']
-    )
+        response_html = HEALTH_PAGE.format(
+            uptime=uptime,
+            total_rolls=stats['total_rolls'],
+            active_users=stats['active_users']
+        )
 
-    return web.Response(text=html, content_type='text/html')
+        return web.Response(text=response_html, content_type='text/html')
+    except Exception:
+        logger.error("Error in handle_health", exc_info=True)
+        return web.Response(text="Internal Server Error", status=500)
 
 
 async def handle_stats(request):
     """Protected stats page"""
     logger.debug("📊 Stats page accessed")
-    
-    if not check_auth(request):
-        logger.warning("⚠️  Unauthorized stats page access attempt")
-        return get_auth_response()
+    try:
+        if not check_auth(request):
+            logger.warning("⚠️  Unauthorized stats page access attempt")
+            return get_auth_response()
 
-    logger.info("✅ Stats page access authorized")
+        logger.info("✅ Stats page access authorized")
 
-    # Calculate uptime
-    uptime = "Not started"
-    if stats['bot_start_time']:
-        delta = datetime.now(timezone.utc) - stats['bot_start_time']
-        days = delta.days
-        hours, remainder = divmod(delta.seconds, 3600)
-        minutes, _ = divmod(remainder, 60)
-        uptime = f"{days}d {hours}h {minutes}m"
+        # Calculate uptime
+        uptime = "Not started"
+        if stats['bot_start_time']:
+            delta = datetime.now(timezone.utc) - stats['bot_start_time']
+            days = delta.days
+            hours, remainder = divmod(delta.seconds, 3600)
+            minutes, _ = divmod(remainder, 60)
+            uptime = f"{days}d {hours}h {minutes}m"
 
-    # Get all users sorted by next roll time
-    users = get_all_users()
-    users_sorted = sorted(
-        [u for u in users if u['next_roll_time']],
-        key=lambda x: x['next_roll_time']
-    )
+        # Get all users sorted by next roll time
+        users = get_all_users()
+        users_sorted = sorted(
+            [u for u in users if u['next_roll_time']],
+            key=lambda x: x['next_roll_time']
+        )
 
-    # Build users list HTML
-    users_html = ""
-    for user in users_sorted:
-        last_roll = user['last_roll_time']
-        next_roll = user['next_roll_time']
+        # Build users list HTML
+        users_html = ""
+        for user in users_sorted:
+            last_roll = user['last_roll_time']
+            next_roll = user['next_roll_time']
 
-        # Get their last fruit
-        rolls = get_user_rolls(user['user_id'])
-        last_fruit = rolls[0]['fruit'] if rolls else "None"
+            # Get their last fruit
+            rolls = get_user_rolls(user['user_id'])
+            last_fruit = rolls[0]['fruit'] if rolls else "None"
 
-        next_roll_str = f"<t:{int(next_roll.timestamp())}:R>" if next_roll else "No upcoming roll"
-        notif_status = "🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"
+            next_roll_str = f"<t:{int(next_roll.timestamp())}:R>" if next_roll else "No upcoming roll"
+            notif_status = "🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"
 
-        users_html += f"""
-        <div class="user-item">
-            <div class="user-info">
-                <div class="user-name">{user['username']}</div>
-                <div class="user-stats">
-                    Last Roll: {last_fruit} | Total: {user['total_rolls']} | {notif_status}
+            users_html += f"""
+            <div class="user-item">
+                <div class="user-info">
+                    <div class="user-name">{html.escape(user['username'])}</div>
+                    <div class="user-stats">
+                        Last Roll: {html.escape(last_fruit)} | Total: {user['total_rolls']} | {notif_status}
+                    </div>
+                </div>
+                <div class="next-roll">
+                    <div style="font-weight: bold;">Next Roll</div>
+                    <div>{next_roll_str}</div>
                 </div>
             </div>
-            <div class="next-roll">
-                <div style="font-weight: bold;">Next Roll</div>
-                <div>{next_roll_str}</div>
-            </div>
-        </div>
-        """
+            """
 
-    if not users_html:
-        users_html = "<p style='text-align: center; opacity: 0.7;'>No users have logged rolls yet</p>"
+        if not users_html:
+            users_html = "<p style='text-align: center; opacity: 0.7;'>No users have logged rolls yet</p>"
 
-    # Get rarity distribution data
-    rarity_dist = get_rarity_distribution()
+        # Get rarity distribution data
+        rarity_dist = get_rarity_distribution()
 
-    # Define rarity order and colors
-    rarity_order = ['Common', 'Uncommon', 'Rare', 'Legendary', 'Mythic']
-    rarity_colors_hex = {
-        'Common': 'rgba(128, 128, 128, 0.8)',
-        'Uncommon': 'rgba(59, 130, 246, 0.8)',
-        'Rare': 'rgba(147, 51, 234, 0.8)',
-        'Legendary': 'rgba(236, 72, 153, 0.8)',
-        'Mythic': 'rgba(220, 38, 38, 0.8)'
-    }
-    rarity_border_colors = {
-        'Common': 'rgba(128, 128, 128, 1)',
-        'Uncommon': 'rgba(59, 130, 246, 1)',
-        'Rare': 'rgba(147, 51, 234, 1)',
-        'Legendary': 'rgba(236, 72, 153, 1)',
-        'Mythic': 'rgba(220, 38, 38, 1)'
-    }
-    rarity_emoji = {
-        'Common': '⚪',
-        'Uncommon': '🔵',
-        'Rare': '🟣',
-        'Legendary': '🔮',
-        'Mythic': '🔴'
-    }
+        # Define rarity order and colors
+        rarity_order = ['Common', 'Uncommon', 'Rare', 'Legendary', 'Mythic']
+        rarity_colors_hex = {
+            'Common': 'rgba(128, 128, 128, 0.8)',
+            'Uncommon': 'rgba(59, 130, 246, 0.8)',
+            'Rare': 'rgba(147, 51, 234, 0.8)',
+            'Legendary': 'rgba(236, 72, 153, 0.8)',
+            'Mythic': 'rgba(220, 38, 38, 0.8)'
+        }
+        rarity_border_colors = {
+            'Common': 'rgba(128, 128, 128, 1)',
+            'Uncommon': 'rgba(59, 130, 246, 1)',
+            'Rare': 'rgba(147, 51, 234, 1)',
+            'Legendary': 'rgba(236, 72, 153, 1)',
+            'Mythic': 'rgba(220, 38, 38, 1)'
+        }
+        rarity_emoji = {
+            'Common': '⚪',
+            'Uncommon': '🔵',
+            'Rare': '🟣',
+            'Legendary': '🔮',
+            'Mythic': '🔴'
+        }
 
-    labels = []
-    data = []
-    colors = []
-    border_colors = []
+        labels = []
+        data = []
+        colors = []
+        border_colors = []
 
-    for rarity in rarity_order:
-        labels.append(f"{rarity_emoji.get(rarity, '')} {rarity}")
-        data.append(rarity_dist.get(rarity, 0))
-        colors.append(rarity_colors_hex.get(rarity, 'rgba(128, 128, 128, 0.8)'))
-        border_colors.append(rarity_border_colors.get(rarity, 'rgba(128, 128, 128, 1)'))
+        for rarity in rarity_order:
+            labels.append(f"{rarity_emoji.get(rarity, '')} {rarity}")
+            data.append(rarity_dist.get(rarity, 0))
+            colors.append(rarity_colors_hex.get(rarity, 'rgba(128, 128, 128, 0.8)'))
+            border_colors.append(rarity_border_colors.get(rarity, 'rgba(128, 128, 128, 1)'))
 
-    rarity_data = {
-        'labels': labels,
-        'data': data,
-        'colors': colors,
-        'borderColors': border_colors
-    }
+        rarity_data = {
+            'labels': labels,
+            'data': data,
+            'colors': colors,
+            'borderColors': border_colors
+        }
 
-    html = STATS_PAGE.format(
-        uptime=uptime,
-        total_rolls=stats['total_rolls'],
-        active_users=len(users),
-        guilds_count=stats['guilds_count'],
-        users_list=users_html,
-        rarity_data=json.dumps(rarity_data),
-        current_time=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
-    )
+        response_html = STATS_PAGE.format(
+            uptime=uptime,
+            total_rolls=stats['total_rolls'],
+            active_users=len(users),
+            guilds_count=stats['guilds_count'],
+            users_list=users_html,
+            rarity_data=json.dumps(rarity_data),
+            current_time=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+        )
 
-    return web.Response(text=html, content_type='text/html')
+        return web.Response(text=response_html, content_type='text/html')
+    except Exception:
+        logger.error("Error in handle_stats", exc_info=True)
+        return web.Response(text="Internal Server Error", status=500)
 
 
 async def handle_suspended(request):
@@ -2198,31 +2206,32 @@ async def handle_suspended(request):
                 last_roll = user['last_roll_time'].strftime('%Y-%m-%d %H:%M UTC') if user['last_roll_time'] else 'Never'
                 created = user['created_at'].strftime('%Y-%m-%d') if user['created_at'] else 'Unknown'
                 reason = user.get('suspension_reason', 'No reason provided')
+                if reason is None: reason = 'No reason provided'
                 
                 users_html += f"""
                 <div class="user-card">
-                    <div class="user-name">🔒 {user['username']}</div>
+                    <div class="user-name">🔒 {html.escape(user['username'])}</div>
                     <div class="user-id">User ID: {user['user_id']}</div>
                     <div class="user-stats">
                         Total Rolls: {user['total_rolls']} | Last Roll: {last_roll} | Joined: {created}
                     </div>
                     <div style="margin-top: 8px; color: #fbbf24; font-weight: bold;">
-                        Reason: {reason if reason else 'No reason provided'}
+                        Reason: {html.escape(reason)}
                     </div>
                 </div>
                 """
         else:
             users_html = '<div class="empty">✅ No suspended users! All clear! 🎉</div>'
         
-        html = SUSPENDED_PAGE.format(
+        response_html = SUSPENDED_PAGE.format(
             suspended_count=len(suspended_users),
             users_list=users_html
         )
         
-        return web.Response(text=html, content_type='text/html')
-    except Exception as e:
-        logger.error(f"❌ Error in handle_suspended: {e}")
-        return web.Response(text=f"Error: {str(e)}", status=500)
+        return web.Response(text=response_html, content_type='text/html')
+    except Exception:
+        logger.error("Error in handle_suspended", exc_info=True)
+        return web.Response(text="Internal Server Error", status=500)
 
 
 async def handle_root(request):
@@ -2254,13 +2263,23 @@ async def handle_favicon(request):
         return web.Response(status=404)
 
 
+@web.middleware
+async def security_headers_middleware(request, handler):
+    """Middleware to add security headers to all responses"""
+    response = await handler(request)
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self';"
+    return response
+
+
 async def start_web_server():
     """Start the web server"""
     logger.info("=" * 80)
     logger.info("🌐 STARTING WEB SERVER")
     logger.info("=" * 80)
     
-    app = web.Application()
+    app = web.Application(middlewares=[security_headers_middleware])
     app.router.add_get('/', handle_root)
     app.router.add_get('/health', handle_health)
     app.router.add_get('/stats', handle_stats)
