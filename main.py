@@ -7,6 +7,9 @@ from aiohttp import web
 import asyncio
 from dotenv import load_dotenv
 import json
+import html
+import secrets
+import base64
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import SimpleConnectionPool
@@ -1506,17 +1509,21 @@ async def suspend_command(interaction: discord.Interaction, user_id: str, reason
 
 # Web server functions
 def check_auth(request) -> bool:
-    """Check HTTP Basic Auth"""
+    """Check HTTP Basic Auth using constant-time comparison"""
     auth_header = request.headers.get('Authorization')
     if not auth_header or not auth_header.startswith('Basic '):
         return False
 
-    import base64
     try:
         credentials = base64.b64decode(auth_header[6:]).decode('utf-8')
         username, password = credentials.split(':', 1)
-        return username == STATS_USER and password == STATS_PASS
-    except:
+
+        # Use constant-time comparison to prevent timing attacks
+        is_user_ok = secrets.compare_digest(username, STATS_USER)
+        is_pass_ok = secrets.compare_digest(password, STATS_PASS)
+
+        return is_user_ok and is_pass_ok
+    except Exception:
         return False
 
 
@@ -1527,6 +1534,17 @@ def get_auth_response():
         status=401,
         headers={'WWW-Authenticate': 'Basic realm="Stats Page"'}
     )
+
+
+@web.middleware
+async def security_headers_middleware(request, handler):
+    """Middleware to add security headers to all responses"""
+    response = await handler(request)
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    # Content-Security-Policy: allow scripts and styles for Chart.js and auto-refresh
+    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self';"
+    return response
 
 
 # HTML Templates
@@ -2103,12 +2121,16 @@ async def handle_stats(request):
         next_roll_str = f"<t:{int(next_roll.timestamp())}:R>" if next_roll else "No upcoming roll"
         notif_status = "🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"
 
+        # Sanitize user-controlled data to prevent XSS
+        safe_username = html.escape(user['username'])
+        safe_last_fruit = html.escape(last_fruit)
+
         users_html += f"""
         <div class="user-item">
             <div class="user-info">
-                <div class="user-name">{user['username']}</div>
+                <div class="user-name">{safe_username}</div>
                 <div class="user-stats">
-                    Last Roll: {last_fruit} | Total: {user['total_rolls']} | {notif_status}
+                    Last Roll: {safe_last_fruit} | Total: {user['total_rolls']} | {notif_status}
                 </div>
             </div>
             <div class="next-roll">
@@ -2197,17 +2219,21 @@ async def handle_suspended(request):
             for user in suspended_users:
                 last_roll = user['last_roll_time'].strftime('%Y-%m-%d %H:%M UTC') if user['last_roll_time'] else 'Never'
                 created = user['created_at'].strftime('%Y-%m-%d') if user['created_at'] else 'Unknown'
-                reason = user.get('suspension_reason', 'No reason provided')
+
+                # Sanitize user-controlled data to prevent XSS
+                safe_username = html.escape(user['username'])
+                reason = user.get('suspension_reason') or 'No reason provided'
+                safe_reason = html.escape(reason)
                 
                 users_html += f"""
                 <div class="user-card">
-                    <div class="user-name">🔒 {user['username']}</div>
+                    <div class="user-name">🔒 {safe_username}</div>
                     <div class="user-id">User ID: {user['user_id']}</div>
                     <div class="user-stats">
                         Total Rolls: {user['total_rolls']} | Last Roll: {last_roll} | Joined: {created}
                     </div>
                     <div style="margin-top: 8px; color: #fbbf24; font-weight: bold;">
-                        Reason: {reason if reason else 'No reason provided'}
+                        Reason: {safe_reason}
                     </div>
                 </div>
                 """
@@ -2220,9 +2246,9 @@ async def handle_suspended(request):
         )
         
         return web.Response(text=html, content_type='text/html')
-    except Exception as e:
-        logger.error(f"❌ Error in handle_suspended: {e}")
-        return web.Response(text=f"Error: {str(e)}", status=500)
+    except Exception:
+        logger.error("❌ Error in handle_suspended", exc_info=True)
+        return web.Response(text="Internal Server Error", status=500)
 
 
 async def handle_root(request):
@@ -2260,7 +2286,7 @@ async def start_web_server():
     logger.info("🌐 STARTING WEB SERVER")
     logger.info("=" * 80)
     
-    app = web.Application()
+    app = web.Application(middlewares=[security_headers_middleware])
     app.router.add_get('/', handle_root)
     app.router.add_get('/health', handle_health)
     app.router.add_get('/stats', handle_stats)
