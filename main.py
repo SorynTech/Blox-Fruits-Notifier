@@ -533,6 +533,80 @@ def get_rarity_distribution() -> Dict:
         return {}
 
 
+def get_active_users_count() -> int:
+    """Get total count of users in database"""
+    conn = None
+    try:
+        logger.debug("📊 Fetching active users count")
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT COUNT(*) FROM users')
+        count = cur.fetchone()[0]
+        cur.close()
+        return count
+    except Exception as e:
+        logger.error(f"❌ Error in get_active_users_count: {e}")
+        return 0
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+
+def get_total_rolls_count() -> int:
+    """Get total count of all rolls in database"""
+    conn = None
+    try:
+        logger.debug("📊 Fetching total rolls count")
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT COUNT(*) FROM rolls')
+        count = cur.fetchone()[0]
+        cur.close()
+        return count
+    except Exception as e:
+        logger.error(f"❌ Error in get_total_rolls_count: {e}")
+        return 0
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+
+def get_users_with_last_fruit() -> List[Dict]:
+    """Get all users with their most recent fruit roll in a single query"""
+    conn = None
+    try:
+        logger.debug("👥 Fetching users with their last fruit")
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        # Use LEFT JOIN LATERAL to get the most recent roll for each user efficiently
+        cur.execute('''
+            SELECT u.user_id,
+                   u.username,
+                   u.total_rolls,
+                   u.last_roll_time,
+                   u.next_roll_time,
+                   u.notifications_enabled,
+                   r.fruit_name as last_fruit
+            FROM users u
+            LEFT JOIN LATERAL (
+                SELECT fruit_name
+                FROM rolls
+                WHERE user_id = u.user_id
+                ORDER BY rolled_at DESC
+                LIMIT 1
+            ) r ON TRUE
+        ''')
+        rows = cur.fetchall()
+        cur.close()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"❌ Error in get_users_with_last_fruit: {e}")
+        return []
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+
 def sync_guild_members_to_db(guild):
     """Sync all guild members to database (bots excluded, alts added as suspended with reasons)"""
     logger.info(f"🔄 Syncing members from guild: {guild.name}")
@@ -1047,9 +1121,10 @@ async def on_ready():
     logger.info("✅ Member sync complete")
     logger.info("=" * 80)
 
-    # Update active users count
-    stats['active_users'] = len(get_all_users())
-    logger.info(f"👥 Active users in database: {stats['active_users']}")
+    # Initialize global stats from database
+    stats['active_users'] = get_active_users_count()
+    stats['total_rolls'] = get_total_rolls_count()
+    logger.info(f"📊 Global stats initialized: {stats['active_users']} users, {stats['total_rolls']} total rolls")
 
     # Sync slash commands
     logger.info("🔄 Syncing slash commands with Discord...")
@@ -2083,27 +2158,23 @@ async def handle_stats(request):
         minutes, _ = divmod(remainder, 60)
         uptime = f"{days}d {hours}h {minutes}m"
 
-    # Get all users sorted by next roll time
-    users = get_all_users()
+    # Get users with their last fruit roll efficiently (O(1) database round-trip)
+    users = get_users_with_last_fruit()
     users_sorted = sorted(
         [u for u in users if u['next_roll_time']],
         key=lambda x: x['next_roll_time']
     )
 
-    # Build users list HTML
-    users_html = ""
+    # Build users list HTML efficiently using "".join()
+    users_list_html = []
     for user in users_sorted:
-        last_roll = user['last_roll_time']
         next_roll = user['next_roll_time']
+        last_fruit = user['last_fruit'] if user['last_fruit'] else "None"
 
-        # Get their last fruit
-        rolls = get_user_rolls(user['user_id'])
-        last_fruit = rolls[0]['fruit'] if rolls else "None"
-
-        next_roll_str = f"<t:{int(next_roll.timestamp())}:R>" if next_roll else "No upcoming roll"
+        next_roll_str = f"<t:{int(next_roll.timestamp())}:R>"
         notif_status = "🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"
 
-        users_html += f"""
+        users_list_html.append(f"""
         <div class="user-item">
             <div class="user-info">
                 <div class="user-name">{user['username']}</div>
@@ -2116,7 +2187,9 @@ async def handle_stats(request):
                 <div>{next_roll_str}</div>
             </div>
         </div>
-        """
+        """)
+
+    users_html = "".join(users_list_html)
 
     if not users_html:
         users_html = "<p style='text-align: center; opacity: 0.7;'>No users have logged rolls yet</p>"
@@ -2193,13 +2266,13 @@ async def handle_suspended(request):
         suspended_users = get_suspended_users()
         
         if suspended_users:
-            users_html = ""
+            users_list_html = []
             for user in suspended_users:
                 last_roll = user['last_roll_time'].strftime('%Y-%m-%d %H:%M UTC') if user['last_roll_time'] else 'Never'
                 created = user['created_at'].strftime('%Y-%m-%d') if user['created_at'] else 'Unknown'
                 reason = user.get('suspension_reason', 'No reason provided')
                 
-                users_html += f"""
+                users_list_html.append(f"""
                 <div class="user-card">
                     <div class="user-name">🔒 {user['username']}</div>
                     <div class="user-id">User ID: {user['user_id']}</div>
@@ -2210,7 +2283,8 @@ async def handle_suspended(request):
                         Reason: {reason if reason else 'No reason provided'}
                     </div>
                 </div>
-                """
+                """)
+            users_html = "".join(users_list_html)
         else:
             users_html = '<div class="empty">✅ No suspended users! All clear! 🎉</div>'
         
