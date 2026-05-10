@@ -13,6 +13,7 @@ from psycopg2.pool import SimpleConnectionPool
 from typing import Optional, List, Dict
 import logging
 import sys
+import html
 
 # ============================================================================
 # LOGGING CONFIGURATION - VERBOSE MODE
@@ -2098,7 +2099,8 @@ async def handle_stats(request):
 
         # Get their last fruit
         rolls = get_user_rolls(user['user_id'])
-        last_fruit = rolls[0]['fruit'] if rolls else "None"
+        last_fruit = html.escape(rolls[0]['fruit']) if rolls else "None"
+        safe_username = html.escape(user['username'])
 
         next_roll_str = f"<t:{int(next_roll.timestamp())}:R>" if next_roll else "No upcoming roll"
         notif_status = "🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"
@@ -2106,7 +2108,7 @@ async def handle_stats(request):
         users_html += f"""
         <div class="user-item">
             <div class="user-info">
-                <div class="user-name">{user['username']}</div>
+                <div class="user-name">{safe_username}</div>
                 <div class="user-stats">
                     Last Roll: {last_fruit} | Total: {user['total_rolls']} | {notif_status}
                 </div>
@@ -2197,17 +2199,20 @@ async def handle_suspended(request):
             for user in suspended_users:
                 last_roll = user['last_roll_time'].strftime('%Y-%m-%d %H:%M UTC') if user['last_roll_time'] else 'Never'
                 created = user['created_at'].strftime('%Y-%m-%d') if user['created_at'] else 'Unknown'
-                reason = user.get('suspension_reason', 'No reason provided')
+
+                safe_username = html.escape(user['username'])
+                reason = user.get('suspension_reason')
+                safe_reason = html.escape(reason) if reason else 'No reason provided'
                 
                 users_html += f"""
                 <div class="user-card">
-                    <div class="user-name">🔒 {user['username']}</div>
+                    <div class="user-name">🔒 {safe_username}</div>
                     <div class="user-id">User ID: {user['user_id']}</div>
                     <div class="user-stats">
                         Total Rolls: {user['total_rolls']} | Last Roll: {last_roll} | Joined: {created}
                     </div>
                     <div style="margin-top: 8px; color: #fbbf24; font-weight: bold;">
-                        Reason: {reason if reason else 'No reason provided'}
+                        Reason: {safe_reason}
                     </div>
                 </div>
                 """
