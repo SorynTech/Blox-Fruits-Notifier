@@ -1,0 +1,3 @@
+## 2025-05-14 - Optimized Database Retrieval and Resource Management
+**Learning:** In highly concurrent environments (like a Discord bot), failing to return database connections to a pool in error paths (using `finally` blocks) can lead to rapid connection exhaustion. Additionally, batching related data retrieval using `LEFT JOIN LATERAL` or `DISTINCT ON` is significantly more efficient than iterative N+1 query patterns.
+**Action:** Always wrap database operations in `try...finally` blocks to ensure `return_db_connection(conn)` is called regardless of success or failure. Use advanced SQL features to minimize round-trips for dashboard views.
