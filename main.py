@@ -201,6 +201,8 @@ def init_database():
                            BOOLEAN
                            DEFAULT
                            TRUE,
+                           last_fruit
+                           TEXT,
                            created_at
                            TIMESTAMP
                            WITH
@@ -210,6 +212,13 @@ def init_database():
                            CURRENT_TIMESTAMP
                        )''')
         logger.info("✅ 'users' table ready")
+
+        # Add last_fruit column if it doesn't exist (for existing databases)
+        try:
+            cur.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS last_fruit TEXT')
+            logger.info("✅ 'last_fruit' column added/verified")
+        except Exception as e:
+            logger.debug(f"last_fruit column may already exist: {e}")
         
         # Add suspended column if it doesn't exist
         try:
@@ -387,9 +396,10 @@ def log_roll(user_id: int, username: str, fruit_name: str):
                        SET total_rolls    = total_rolls + 1,
                            last_roll_time = %s,
                            next_roll_time = %s,
-                           username       = %s
+                           username       = %s,
+                           last_fruit     = %s
                        WHERE user_id = %s''',
-                    (now, next_roll, username, user_id))
+                    (now, next_roll, username, fruit_name, user_id))
 
         # Log the roll WITH RARITY
         logger.debug(f"📝 Inserting roll record")
@@ -636,6 +646,85 @@ def get_suspended_users():
         return [dict(row) for row in rows]
     except Exception as e:
         logger.error(f"❌ Error getting suspended users: {e}")
+        return []
+
+
+def get_total_rolls_count() -> int:
+    """Get total count of all rolls recorded in the database"""
+    try:
+        logger.debug("📊 Fetching total rolls count")
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT COUNT(*) FROM rolls')
+        count = cur.fetchone()[0]
+        cur.close()
+        return_db_connection(conn)
+        return count
+    except Exception as e:
+        logger.error(f"❌ Error in get_total_rolls_count: {e}")
+        return 0
+
+
+def get_active_users_count() -> int:
+    """Get total count of users in the database"""
+    try:
+        logger.debug("📊 Fetching active users count")
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT COUNT(*) FROM users')
+        count = cur.fetchone()[0]
+        cur.close()
+        return_db_connection(conn)
+        return count
+    except Exception as e:
+        logger.error(f"❌ Error in get_active_users_count: {e}")
+        return 0
+
+
+def get_users_with_last_fruit() -> List[Dict]:
+    """
+    Get all users and their most recent fruit in a single query.
+    Uses the cached last_fruit column in the users table.
+    """
+    try:
+        logger.debug("👥 Fetching users with cached last fruit")
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        # Using the cached last_fruit column for O(1) per user lookup
+        cur.execute('''SELECT user_id,
+                              username,
+                              total_rolls,
+                              last_roll_time,
+                              next_roll_time,
+                              notifications_enabled,
+                              last_fruit
+                       FROM users''')
+        rows = cur.fetchall()
+        cur.close()
+        return_db_connection(conn)
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"❌ Error in get_users_with_last_fruit: {e}")
+        return []
+
+
+def get_users_to_notify(now: datetime) -> List[Dict]:
+    """Fetch only users whose cooldown has expired and notifications are enabled"""
+    try:
+        logger.debug("⏰ Fetching users to notify")
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute('''SELECT user_id, username, next_roll_time, notifications_enabled
+                       FROM users
+                       WHERE notifications_enabled = TRUE
+                       AND next_roll_time IS NOT NULL
+                       AND next_roll_time <= %s''', (now,))
+        rows = cur.fetchall()
+        cur.close()
+        return_db_connection(conn)
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"❌ Error in get_users_to_notify: {e}")
         return []
 
 
@@ -1047,9 +1136,11 @@ async def on_ready():
     logger.info("✅ Member sync complete")
     logger.info("=" * 80)
 
-    # Update active users count
-    stats['active_users'] = len(get_all_users())
+    # Update active users and total rolls count using efficient helper functions
+    stats['active_users'] = get_active_users_count()
+    stats['total_rolls'] = get_total_rolls_count()
     logger.info(f"👥 Active users in database: {stats['active_users']}")
+    logger.info(f"🎲 Total rolls in database: {stats['total_rolls']}")
 
     # Sync slash commands
     logger.info("🔄 Syncing slash commands with Discord...")
@@ -1135,7 +1226,8 @@ async def notification_checker():
     """Check for users who need roll reminders"""
     logger.debug("⏰ Notification checker running...")
     now = datetime.now(timezone.utc)
-    users = get_all_users()
+    # Fetch only users that actually need to be notified
+    users_to_notify = get_users_to_notify(now)
 
     # Get notification channel
     channel = bot.get_channel(NOTIFICATION_CHANNEL_ID)
@@ -1144,61 +1236,57 @@ async def notification_checker():
         return
 
     notifications_sent = 0
-    for user_data in users:
-        if not user_data['notifications_enabled']:
-            continue
+    for user_data in users_to_notify:
+        try:
+            display_name = get_display_name(user_data['user_id'], user_data['username'])
+            logger.info(f"🔔 Sending roll reminder to {display_name} ({user_data['username']}, ID: {user_data['user_id']})")
 
-        if user_data['next_roll_time'] and user_data['next_roll_time'] <= now:
+            # Special embed for Dad
+            if user_data['user_id'] == DAD_USER_ID:
+                embed = discord.Embed(
+                    title="🎲 Fruity rolly ready!",
+                    description=f"Daddy's fruit rolly cooldown is all doney woney :3",
+                    color=discord.Color.gold()
+                )
+                embed.add_field(
+                    name="📝 Log your rolly",
+                    value="Use `/fruit-roll` to loggy your next fruit roll!",
+                    inline=False
+                )
+                embed.set_footer(text="Use /sleep to disable able these reminders tee hee :3c")
+                mention_text = f"**Blox Fruits Notifier:** Daddy Lucian Your fruit roll is weddy when you are :3c ||<@{user_data['user_id']}>||"
+            else:
+                embed = discord.Embed(
+                    title="🎲 Fruit Roll Ready!",
+                    description=f"**{display_name}**'s fruit roll cooldown is complete!",
+                    color=discord.Color.gold()
+                )
+                embed.add_field(
+                    name="📝 Log Your Roll",
+                    value="Use `/fruit-roll` to log your next fruit roll!",
+                    inline=False
+                )
+                embed.set_footer(text="Use /sleep to disable these reminders")
+                mention_text = f"<@{user_data['user_id']}>"
+
+            await channel.send(content=mention_text, embed=embed)
+            notifications_sent += 1
+
+            # Clear next_roll_time so we don't spam
             try:
-                display_name = get_display_name(user_data['user_id'], user_data['username'])
-                logger.info(f"🔔 Sending roll reminder to {display_name} ({user_data['username']}, ID: {user_data['user_id']})")
-                
-                # Special embed for Dad
-                if user_data['user_id'] == DAD_USER_ID:
-                    embed = discord.Embed(
-                        title="🎲 Fruity rolly ready!",
-                        description=f"Daddy's fruit rolly cooldown is all doney woney :3",
-                        color=discord.Color.gold()
-                    )
-                    embed.add_field(
-                        name="📝 Log your rolly",
-                        value="Use `/fruit-roll` to loggy your next fruit roll!",
-                        inline=False
-                    )
-                    embed.set_footer(text="Use /sleep to disable able these reminders tee hee :3c")
-                    mention_text = f"**Blox Fruits Notifier:** Daddy Lucian Your fruit roll is weddy when you are :3c ||<@{user_data['user_id']}>||"
-                else:
-                    embed = discord.Embed(
-                        title="🎲 Fruit Roll Ready!",
-                        description=f"**{display_name}**'s fruit roll cooldown is complete!",
-                        color=discord.Color.gold()
-                    )
-                    embed.add_field(
-                        name="📝 Log Your Roll",
-                        value="Use `/fruit-roll` to log your next fruit roll!",
-                        inline=False
-                    )
-                    embed.set_footer(text="Use /sleep to disable these reminders")
-                    mention_text = f"<@{user_data['user_id']}>"
-
-                await channel.send(content=mention_text, embed=embed)
-                notifications_sent += 1
-
-                # Clear next_roll_time so we don't spam
-                try:
-                    conn = get_db_connection()
-                    cur = conn.cursor()
-                    cur.execute('UPDATE users SET next_roll_time = NULL WHERE user_id = %s',
-                                (user_data['user_id'],))
-                    conn.commit()
-                    cur.close()
-                    return_db_connection(conn)
-                except Exception as e:
-                    logger.error(f"❌ Error updating next_roll_time: {e}")
-
-                logger.info(f"✅ Sent roll reminder to {display_name}")
+                conn = get_db_connection()
+                cur = conn.cursor()
+                cur.execute('UPDATE users SET next_roll_time = NULL WHERE user_id = %s',
+                            (user_data['user_id'],))
+                conn.commit()
+                cur.close()
+                return_db_connection(conn)
             except Exception as e:
-                logger.error(f"❌ Failed to send reminder to {user_data['user_id']}: {e}")
+                logger.error(f"❌ Error updating next_roll_time: {e}")
+
+            logger.info(f"✅ Sent roll reminder to {display_name}")
+        except Exception as e:
+            logger.error(f"❌ Failed to send reminder to {user_data['user_id']}: {e}")
     
     if notifications_sent > 0:
         logger.info(f"📬 Sent {notifications_sent} roll reminder(s) this cycle")
@@ -2083,27 +2171,23 @@ async def handle_stats(request):
         minutes, _ = divmod(remainder, 60)
         uptime = f"{days}d {hours}h {minutes}m"
 
-    # Get all users sorted by next roll time
-    users = get_all_users()
+    # Get all users with their last fruit in a single query to avoid N+1 problem
+    users = get_users_with_last_fruit()
     users_sorted = sorted(
         [u for u in users if u['next_roll_time']],
         key=lambda x: x['next_roll_time']
     )
 
-    # Build users list HTML
-    users_html = ""
+    # Build users list HTML using O(N) join instead of iterative concatenation
+    users_html_list = []
     for user in users_sorted:
-        last_roll = user['last_roll_time']
         next_roll = user['next_roll_time']
-
-        # Get their last fruit
-        rolls = get_user_rolls(user['user_id'])
-        last_fruit = rolls[0]['fruit'] if rolls else "None"
+        last_fruit = user.get('last_fruit') or "None"
 
         next_roll_str = f"<t:{int(next_roll.timestamp())}:R>" if next_roll else "No upcoming roll"
         notif_status = "🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"
 
-        users_html += f"""
+        users_html_list.append(f"""
         <div class="user-item">
             <div class="user-info">
                 <div class="user-name">{user['username']}</div>
@@ -2116,7 +2200,9 @@ async def handle_stats(request):
                 <div>{next_roll_str}</div>
             </div>
         </div>
-        """
+        """)
+
+    users_html = "".join(users_html_list)
 
     if not users_html:
         users_html = "<p style='text-align: center; opacity: 0.7;'>No users have logged rolls yet</p>"
