@@ -225,6 +225,13 @@ def init_database():
         except Exception as e:
             logger.debug(f"Suspension_reason column may already exist: {e}")
 
+        # Add last_fruit column (cache for performance) if it doesn't exist
+        try:
+            cur.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS last_fruit TEXT')
+            logger.info("✅ 'last_fruit' column added/verified")
+        except Exception as e:
+            logger.debug(f"Last_fruit column may already exist: {e}")
+
         # Rolls table - NOW INCLUDES RARITY
         logger.info("📋 Creating 'rolls' table if not exists...")
         cur.execute('''CREATE TABLE IF NOT EXISTS rolls
@@ -387,9 +394,10 @@ def log_roll(user_id: int, username: str, fruit_name: str):
                        SET total_rolls    = total_rolls + 1,
                            last_roll_time = %s,
                            next_roll_time = %s,
-                           username       = %s
+                           username       = %s,
+                           last_fruit     = %s
                        WHERE user_id = %s''',
-                    (now, next_roll, username, user_id))
+                    (now, next_roll, username, fruit_name, user_id))
 
         # Log the roll WITH RARITY
         logger.debug(f"📝 Inserting roll record")
@@ -452,6 +460,38 @@ def get_all_users() -> List[Dict]:
         return [dict(row) for row in rows]
     except Exception as e:
         logger.error(f"❌ Error in get_all_users: {e}")
+        return []
+
+
+def get_users_with_last_fruit() -> List[Dict]:
+    """Get all users with their last fruit roll efficiently (Eliminates N+1)"""
+    try:
+        logger.debug("👥 Fetching all users with last fruit from database")
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        # Use COALESCE to take the cached last_fruit if available,
+        # otherwise get it from the rolls table via a LATERAL JOIN for backward compatibility.
+        # This optimizes dashboard retrieval to a single query.
+        cur.execute('''
+            SELECT u.*,
+                   COALESCE(u.last_fruit, r.fruit_name) as display_last_fruit
+            FROM users u
+            LEFT JOIN LATERAL (
+                SELECT fruit_name
+                FROM rolls
+                WHERE user_id = u.user_id
+                ORDER BY rolled_at DESC
+                LIMIT 1
+            ) r ON TRUE
+        ''')
+        rows = cur.fetchall()
+        cur.close()
+        return_db_connection(conn)
+
+        logger.debug(f"✅ Fetched {len(rows)} users with last fruit")
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"❌ Error in get_users_with_last_fruit: {e}")
         return []
 
 
@@ -2083,8 +2123,8 @@ async def handle_stats(request):
         minutes, _ = divmod(remainder, 60)
         uptime = f"{days}d {hours}h {minutes}m"
 
-    # Get all users sorted by next roll time
-    users = get_all_users()
+    # Get all users with their last fruit roll (optimized single query)
+    users = get_users_with_last_fruit()
     users_sorted = sorted(
         [u for u in users if u['next_roll_time']],
         key=lambda x: x['next_roll_time']
@@ -2096,9 +2136,8 @@ async def handle_stats(request):
         last_roll = user['last_roll_time']
         next_roll = user['next_roll_time']
 
-        # Get their last fruit
-        rolls = get_user_rolls(user['user_id'])
-        last_fruit = rolls[0]['fruit'] if rolls else "None"
+        # Get their last fruit from optimized query result
+        last_fruit = user.get('display_last_fruit') or "None"
 
         next_roll_str = f"<t:{int(next_roll.timestamp())}:R>" if next_roll else "No upcoming roll"
         notif_status = "🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"
