@@ -1,0 +1,4 @@
+## 2026-05-16 - Timing Attack and XSS Hardening
+**Vulnerability:** The web dashboard used direct string comparison for authentication, making it susceptible to timing attacks. It also rendered user-controlled data (usernames and suspension reasons) directly into HTML templates without sanitization, leading to potential Cross-Site Scripting (XSS) risks.
+**Learning:** Basic authentication implementations often overlook timing side-channels. Furthermore, server-side rendered HTML requires consistent use of escaping for all dynamic content to prevent XSS, especially when data is sourced from external services like Discord.
+**Prevention:** Always use `secrets.compare_digest()` for credential validation. Systematically apply `html.escape()` to all user-provided or database-sourced strings before injecting them into HTML templates. Use security-focused middlewares to enforce defense-in-depth headers like CSP and X-Frame-Options.
