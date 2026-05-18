@@ -1,0 +1,3 @@
+## 2025-05-18 - Optimized Stats Dashboard Data Retrieval
+**Learning:** The previous implementation suffered from an N+1 query problem, where the dashboard fetched all users and then queried the rolls table for each user to find their last fruit. Additionally, global statistics were initialized by fetching and counting all records in memory.
+**Action:** Implement a `last_fruit` cache column in the `users` table, maintained during `log_roll`. Use SQL-side aggregations (`COUNT(*)`) and targeted filtering (`get_users_to_notify`) to minimize data transfer and memory overhead. Always use `try...finally` for database connection pool management to prevent leaks.
