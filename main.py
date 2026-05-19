@@ -298,6 +298,27 @@ def init_database():
         cur.execute('''CREATE INDEX IF NOT EXISTS idx_users_next_roll_time ON users(next_roll_time)''')
         logger.info("✅ All indexes created")
 
+        # Add last_fruit column if it doesn't exist (Cache for performance)
+        try:
+            cur.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS last_fruit TEXT')
+            logger.info("✅ 'last_fruit' column added/verified")
+        except Exception as e:
+            logger.debug(f"Last_fruit column may already exist: {e}")
+
+        # Idempotent backfill of last_fruit from rolls table
+        logger.info("🔄 Backfilling last_fruit cache...")
+        cur.execute('''
+            UPDATE users u
+            SET last_fruit = r.fruit_name
+            FROM (
+                SELECT DISTINCT ON (user_id) user_id, fruit_name
+                FROM rolls
+                ORDER BY user_id, rolled_at DESC
+            ) r
+            WHERE u.user_id = r.user_id AND u.last_fruit IS NULL
+        ''')
+        logger.info("✅ Backfill complete")
+
         conn.commit()
         logger.info("✅ Database changes committed")
         cur.close()
@@ -387,9 +408,10 @@ def log_roll(user_id: int, username: str, fruit_name: str):
                        SET total_rolls    = total_rolls + 1,
                            last_roll_time = %s,
                            next_roll_time = %s,
-                           username       = %s
+                           username       = %s,
+                           last_fruit     = %s
                        WHERE user_id = %s''',
-                    (now, next_roll, username, user_id))
+                    (now, next_roll, username, fruit_name, user_id))
 
         # Log the roll WITH RARITY
         logger.debug(f"📝 Inserting roll record")
@@ -442,7 +464,8 @@ def get_all_users() -> List[Dict]:
                               total_rolls,
                               last_roll_time,
                               next_roll_time,
-                              notifications_enabled
+                              notifications_enabled,
+                              last_fruit
                        FROM users''')
         rows = cur.fetchall()
         cur.close()
@@ -473,6 +496,36 @@ def toggle_notifications(user_id: int, enabled: bool):
         if conn:
             conn.rollback()
             return_db_connection(conn)
+
+
+def get_active_users_count() -> int:
+    """Get total number of active users from database (efficiently)"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT COUNT(*) FROM users')
+        count = cur.fetchone()[0]
+        cur.close()
+        return_db_connection(conn)
+        return count
+    except Exception as e:
+        logger.error(f"❌ Error in get_active_users_count: {e}")
+        return 0
+
+
+def get_total_rolls_count() -> int:
+    """Get total number of rolls from database (efficiently)"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT COUNT(*) FROM rolls')
+        count = cur.fetchone()[0]
+        cur.close()
+        return_db_connection(conn)
+        return count
+    except Exception as e:
+        logger.error(f"❌ Error in get_total_rolls_count: {e}")
+        return 0
 
 
 def log_command_usage(command_name: str, user_id: int):
@@ -1047,9 +1100,11 @@ async def on_ready():
     logger.info("✅ Member sync complete")
     logger.info("=" * 80)
 
-    # Update active users count
-    stats['active_users'] = len(get_all_users())
+    # Initialize global stats from database efficiently
+    stats['active_users'] = get_active_users_count()
+    stats['total_rolls'] = get_total_rolls_count()
     logger.info(f"👥 Active users in database: {stats['active_users']}")
+    logger.info(f"🎲 Total rolls in database: {stats['total_rolls']}")
 
     # Sync slash commands
     logger.info("🔄 Syncing slash commands with Discord...")
@@ -2096,9 +2151,8 @@ async def handle_stats(request):
         last_roll = user['last_roll_time']
         next_roll = user['next_roll_time']
 
-        # Get their last fruit
-        rolls = get_user_rolls(user['user_id'])
-        last_fruit = rolls[0]['fruit'] if rolls else "None"
+        # Get their last fruit (from cache - eliminates N+1 query problem)
+        last_fruit = user.get('last_fruit') or "None"
 
         next_roll_str = f"<t:{int(next_roll.timestamp())}:R>" if next_roll else "No upcoming roll"
         notif_status = "🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"
