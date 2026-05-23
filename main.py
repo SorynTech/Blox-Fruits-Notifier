@@ -7,6 +7,8 @@ from aiohttp import web
 import asyncio
 from dotenv import load_dotenv
 import json
+import html
+import secrets
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import SimpleConnectionPool
@@ -1515,7 +1517,8 @@ def check_auth(request) -> bool:
     try:
         credentials = base64.b64decode(auth_header[6:]).decode('utf-8')
         username, password = credentials.split(':', 1)
-        return username == STATS_USER and password == STATS_PASS
+        # Use timing-safe comparison to prevent timing attacks
+        return secrets.compare_digest(username, STATS_USER) and secrets.compare_digest(password, STATS_PASS)
     except:
         return False
 
@@ -2103,12 +2106,17 @@ async def handle_stats(request):
         next_roll_str = f"<t:{int(next_roll.timestamp())}:R>" if next_roll else "No upcoming roll"
         notif_status = "🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"
 
+        # Sanitize user-controlled or database data before rendering in HTML
+        safe_username = html.escape(str(user['username']))
+        safe_last_fruit = html.escape(str(last_fruit))
+        safe_notif_status = html.escape(str(notif_status))
+
         users_html += f"""
         <div class="user-item">
             <div class="user-info">
-                <div class="user-name">{user['username']}</div>
+                <div class="user-name">{safe_username}</div>
                 <div class="user-stats">
-                    Last Roll: {last_fruit} | Total: {user['total_rolls']} | {notif_status}
+                    Last Roll: {safe_last_fruit} | Total: {user['total_rolls']} | {safe_notif_status}
                 </div>
             </div>
             <div class="next-roll">
@@ -2166,7 +2174,7 @@ async def handle_stats(request):
         'borderColors': border_colors
     }
 
-    html = STATS_PAGE.format(
+    response_html = STATS_PAGE.format(
         uptime=uptime,
         total_rolls=stats['total_rolls'],
         active_users=len(users),
@@ -2176,7 +2184,7 @@ async def handle_stats(request):
         current_time=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
     )
 
-    return web.Response(text=html, content_type='text/html')
+    return web.Response(text=response_html, content_type='text/html')
 
 
 async def handle_suspended(request):
@@ -2198,31 +2206,36 @@ async def handle_suspended(request):
                 last_roll = user['last_roll_time'].strftime('%Y-%m-%d %H:%M UTC') if user['last_roll_time'] else 'Never'
                 created = user['created_at'].strftime('%Y-%m-%d') if user['created_at'] else 'Unknown'
                 reason = user.get('suspension_reason', 'No reason provided')
+
+                # Sanitize user-controlled or database data before rendering in HTML
+                safe_username = html.escape(str(user['username']))
+                safe_reason = html.escape(str(reason))
                 
                 users_html += f"""
                 <div class="user-card">
-                    <div class="user-name">🔒 {user['username']}</div>
+                    <div class="user-name">🔒 {safe_username}</div>
                     <div class="user-id">User ID: {user['user_id']}</div>
                     <div class="user-stats">
                         Total Rolls: {user['total_rolls']} | Last Roll: {last_roll} | Joined: {created}
                     </div>
                     <div style="margin-top: 8px; color: #fbbf24; font-weight: bold;">
-                        Reason: {reason if reason else 'No reason provided'}
+                        Reason: {safe_reason if reason else 'No reason provided'}
                     </div>
                 </div>
                 """
         else:
             users_html = '<div class="empty">✅ No suspended users! All clear! 🎉</div>'
         
-        html = SUSPENDED_PAGE.format(
+        response_html = SUSPENDED_PAGE.format(
             suspended_count=len(suspended_users),
             users_list=users_html
         )
         
-        return web.Response(text=html, content_type='text/html')
+        return web.Response(text=response_html, content_type='text/html')
     except Exception as e:
         logger.error(f"❌ Error in handle_suspended: {e}")
-        return web.Response(text=f"Error: {str(e)}", status=500)
+        # Return generic error message to avoid information leakage
+        return web.Response(text="Internal Server Error", status=500)
 
 
 async def handle_root(request):
