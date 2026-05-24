@@ -207,23 +207,25 @@ def init_database():
                            TIME
                            ZONE
                            DEFAULT
-                           CURRENT_TIMESTAMP
+                           CURRENT_TIMESTAMP,
+                           last_fruit
+                           TEXT
                        )''')
         logger.info("✅ 'users' table ready")
         
-        # Add suspended column if it doesn't exist
-        try:
-            cur.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS suspended BOOLEAN DEFAULT FALSE')
-            logger.info("✅ 'suspended' column added/verified")
-        except Exception as e:
-            logger.debug(f"Suspended column may already exist: {e}")
+        # Add columns if they don't exist
+        columns_to_add = [
+            ('suspended', 'BOOLEAN DEFAULT FALSE'),
+            ('suspension_reason', 'TEXT'),
+            ('last_fruit', 'TEXT')
+        ]
         
-        # Add suspension_reason column if it doesn't exist
-        try:
-            cur.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS suspension_reason TEXT')
-            logger.info("✅ 'suspension_reason' column added/verified")
-        except Exception as e:
-            logger.debug(f"Suspension_reason column may already exist: {e}")
+        for col_name, col_type in columns_to_add:
+            try:
+                cur.execute(f'ALTER TABLE users ADD COLUMN IF NOT EXISTS {col_name} {col_type}')
+                logger.info(f"✅ '{col_name}' column added/verified")
+            except Exception as e:
+                logger.debug(f"Column {col_name} may already exist: {e}")
 
         # Rolls table - NOW INCLUDES RARITY
         logger.info("📋 Creating 'rolls' table if not exists...")
@@ -297,6 +299,20 @@ def init_database():
         cur.execute('''CREATE INDEX IF NOT EXISTS idx_command_usage_used_at ON command_usage(used_at)''')
         cur.execute('''CREATE INDEX IF NOT EXISTS idx_users_next_roll_time ON users(next_roll_time)''')
         logger.info("✅ All indexes created")
+
+        # Idempotent backfill for last_fruit cache
+        logger.info("🔄 Backfilling last_fruit cache...")
+        cur.execute('''
+            UPDATE users u
+            SET last_fruit = r.fruit_name
+            FROM (
+                SELECT DISTINCT ON (user_id) user_id, fruit_name
+                FROM rolls
+                ORDER BY user_id, rolled_at DESC
+            ) r
+            WHERE u.user_id = r.user_id AND u.last_fruit IS NULL
+        ''')
+        logger.info("✅ last_fruit cache backfilled")
 
         conn.commit()
         logger.info("✅ Database changes committed")
@@ -381,15 +397,16 @@ def log_roll(user_id: int, username: str, fruit_name: str):
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # Update user
+        # Update user (including last_fruit cache)
         logger.debug(f"📝 Updating user stats for {display_name} ({username})")
         cur.execute('''UPDATE users
                        SET total_rolls    = total_rolls + 1,
                            last_roll_time = %s,
                            next_roll_time = %s,
-                           username       = %s
+                           username       = %s,
+                           last_fruit     = %s
                        WHERE user_id = %s''',
-                    (now, next_roll, username, user_id))
+                    (now, next_roll, username, fruit_name, user_id))
 
         # Log the roll WITH RARITY
         logger.debug(f"📝 Inserting roll record")
@@ -442,7 +459,8 @@ def get_all_users() -> List[Dict]:
                               total_rolls,
                               last_roll_time,
                               next_roll_time,
-                              notifications_enabled
+                              notifications_enabled,
+                              last_fruit
                        FROM users''')
         rows = cur.fetchall()
         cur.close()
@@ -2096,9 +2114,8 @@ async def handle_stats(request):
         last_roll = user['last_roll_time']
         next_roll = user['next_roll_time']
 
-        # Get their last fruit
-        rolls = get_user_rolls(user['user_id'])
-        last_fruit = rolls[0]['fruit'] if rolls else "None"
+        # Use cached last_fruit to avoid N+1 queries
+        last_fruit = user.get('last_fruit') or "None"
 
         next_roll_str = f"<t:{int(next_roll.timestamp())}:R>" if next_roll else "No upcoming roll"
         notif_status = "🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"

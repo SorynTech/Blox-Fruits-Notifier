@@ -1,0 +1,3 @@
+## 2025-05-24 - N+1 Query Bottleneck in Dashboard Retrieval
+**Learning:** The stats dashboard was executing a separate database query per user to fetch their entire roll history just to extract the single most recent fruit name. This created $O(N)$ database round-trips where $N$ is the number of users, causing significant latency as the user base grew.
+**Action:** Implemented a caching strategy by adding a `last_fruit` column to the `users` table. Updated the roll logging logic to maintain this cache and performed an idempotent backfill for existing data. Optimized the dashboard retrieval to a single $O(1)$ query.
