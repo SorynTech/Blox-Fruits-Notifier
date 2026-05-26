@@ -1,0 +1,3 @@
+## 2025-05-26 - [N+1 Query in Web Dashboard]
+**Learning:** The `handle_stats` page suffered from an N+1 query bottleneck because it retrieved the most recent roll for every user in a loop using `get_user_rolls()`. As the user base grows, this causes linear degradation of page load times and unnecessary database load.
+**Action:** Implement a cache column (e.g., `last_fruit`) on the primary `users` table. Update this column during the roll logging process and use it directly when rendering lists to keep database round-trips to O(1). Always include an idempotent backfill for existing data when introducing such caches.
