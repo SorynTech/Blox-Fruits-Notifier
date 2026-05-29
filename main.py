@@ -201,6 +201,8 @@ def init_database():
                            BOOLEAN
                            DEFAULT
                            TRUE,
+                           last_fruit
+                           TEXT,
                            created_at
                            TIMESTAMP
                            WITH
@@ -224,6 +226,27 @@ def init_database():
             logger.info("✅ 'suspension_reason' column added/verified")
         except Exception as e:
             logger.debug(f"Suspension_reason column may already exist: {e}")
+
+        # Add last_fruit column for performance caching (avoids N+1 in stats)
+        try:
+            cur.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS last_fruit TEXT')
+            logger.info("✅ 'last_fruit' column added/verified")
+
+            # Backfill last_fruit from rolls table for existing users
+            logger.info("🔄 Backfilling 'last_fruit' cache...")
+            cur.execute('''
+                UPDATE users u
+                SET last_fruit = r.fruit_name
+                FROM (
+                    SELECT DISTINCT ON (user_id) user_id, fruit_name
+                    FROM rolls
+                    ORDER BY user_id, rolled_at DESC
+                ) r
+                WHERE u.user_id = r.user_id AND u.last_fruit IS NULL
+            ''')
+            logger.info("✅ 'last_fruit' cache backfilled")
+        except Exception as e:
+            logger.error(f"❌ Error updating last_fruit column/cache: {e}")
 
         # Rolls table - NOW INCLUDES RARITY
         logger.info("📋 Creating 'rolls' table if not exists...")
@@ -387,9 +410,10 @@ def log_roll(user_id: int, username: str, fruit_name: str):
                        SET total_rolls    = total_rolls + 1,
                            last_roll_time = %s,
                            next_roll_time = %s,
-                           username       = %s
+                           username       = %s,
+                           last_fruit     = %s
                        WHERE user_id = %s''',
-                    (now, next_roll, username, user_id))
+                    (now, next_roll, username, fruit_name, user_id))
 
         # Log the roll WITH RARITY
         logger.debug(f"📝 Inserting roll record")
@@ -442,7 +466,8 @@ def get_all_users() -> List[Dict]:
                               total_rolls,
                               last_roll_time,
                               next_roll_time,
-                              notifications_enabled
+                              notifications_enabled,
+                              last_fruit
                        FROM users''')
         rows = cur.fetchall()
         cur.close()
@@ -2096,9 +2121,8 @@ async def handle_stats(request):
         last_roll = user['last_roll_time']
         next_roll = user['next_roll_time']
 
-        # Get their last fruit
-        rolls = get_user_rolls(user['user_id'])
-        last_fruit = rolls[0]['fruit'] if rolls else "None"
+        # Use cached last fruit to avoid N+1 queries
+        last_fruit = user.get('last_fruit') or "None"
 
         next_roll_str = f"<t:{int(next_roll.timestamp())}:R>" if next_roll else "No upcoming roll"
         notif_status = "🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"
