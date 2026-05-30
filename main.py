@@ -410,16 +410,22 @@ def log_roll(user_id: int, username: str, fruit_name: str):
             return_db_connection(conn)
 
 
-def get_user_rolls(user_id: int) -> List[Dict]:
-    """Get all rolls for a user"""
+def get_user_rolls(user_id: int, limit: int = None) -> List[Dict]:
+    """Get all rolls for a user with optional limit"""
     try:
         logger.debug(f"📊 Fetching roll history for user ID: {user_id}")
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute('''SELECT fruit_name, rolled_at
+
+        query = '''SELECT fruit_name, rolled_at
                        FROM rolls
                        WHERE user_id = %s
-                       ORDER BY rolled_at DESC''', (user_id,))
+                       ORDER BY rolled_at DESC'''
+
+        if limit:
+            query += f' LIMIT {int(limit)}'
+
+        cur.execute(query, (user_id,))
         rows = cur.fetchall()
         cur.close()
         return_db_connection(conn)
@@ -452,6 +458,46 @@ def get_all_users() -> List[Dict]:
         return [dict(row) for row in rows]
     except Exception as e:
         logger.error(f"❌ Error in get_all_users: {e}")
+        return []
+
+
+def get_users_on_cooldown_with_last_fruit() -> List[Dict]:
+    """⚡ Bolt: Efficiently fetch all users on cooldown along with their most recent fruit roll in one query."""
+    try:
+        logger.debug("👥 Fetching users on cooldown with last fruit (O(1) optimization)")
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        # Using DISTINCT ON to get only the most recent roll per user from the rolls table
+        # then joining with the users table to get only those on cooldown.
+        cur.execute('''
+            SELECT
+                u.user_id,
+                u.username,
+                u.total_rolls,
+                u.last_roll_time,
+                u.next_roll_time,
+                u.notifications_enabled,
+                latest_roll.fruit_name as last_fruit
+            FROM users u
+            LEFT JOIN (
+                SELECT DISTINCT ON (user_id)
+                    user_id,
+                    fruit_name
+                FROM rolls
+                ORDER BY user_id, rolled_at DESC
+            ) latest_roll ON u.user_id = latest_roll.user_id
+            WHERE u.next_roll_time IS NOT NULL
+            ORDER BY u.next_roll_time ASC
+        ''')
+        rows = cur.fetchall()
+        cur.close()
+        return_db_connection(conn)
+
+        logger.debug(f"✅ Fetched {len(rows)} users on cooldown")
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"❌ Error in get_users_on_cooldown_with_last_fruit: {e}")
         return []
 
 
@@ -1047,9 +1093,26 @@ async def on_ready():
     logger.info("✅ Member sync complete")
     logger.info("=" * 80)
 
-    # Update active users count
-    stats['active_users'] = len(get_all_users())
-    logger.info(f"👥 Active users in database: {stats['active_users']}")
+    # ⚡ Bolt: Efficiently initialize global stats from database (O(1) vs O(N))
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Get total rolls across all users
+        cur.execute("SELECT SUM(total_rolls) FROM users")
+        total_rolls = cur.fetchone()[0] or 0
+        stats['total_rolls'] = total_rolls
+
+        # Get total number of active users
+        cur.execute("SELECT COUNT(*) FROM users")
+        stats['active_users'] = cur.fetchone()[0] or 0
+
+        cur.close()
+        return_db_connection(conn)
+
+        logger.info(f"📊 Global stats initialized: {stats['total_rolls']} rolls, {stats['active_users']} users")
+    except Exception as e:
+        logger.error(f"❌ Error initializing global stats: {e}")
 
     # Sync slash commands
     logger.info("🔄 Syncing slash commands with Discord...")
@@ -2083,22 +2146,27 @@ async def handle_stats(request):
         minutes, _ = divmod(remainder, 60)
         uptime = f"{days}d {hours}h {minutes}m"
 
-    # Get all users sorted by next roll time
-    users = get_all_users()
-    users_sorted = sorted(
-        [u for u in users if u['next_roll_time']],
-        key=lambda x: x['next_roll_time']
-    )
+    # ⚡ Bolt: Efficiently fetch total active users to ensure count is always fresh (O(1))
+    active_users_count = stats.get('active_users', 0)
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM users")
+        active_users_count = cur.fetchone()[0] or 0
+        stats['active_users'] = active_users_count  # Sync cache
+        cur.close()
+        return_db_connection(conn)
+    except Exception as e:
+        logger.error(f"❌ Error fetching active users count: {e}")
+
+    # ⚡ Bolt: Fetch users on cooldown with their last fruit in one optimized query (O(1) vs O(N))
+    users_on_cooldown = get_users_on_cooldown_with_last_fruit()
 
     # Build users list HTML
     users_html = ""
-    for user in users_sorted:
-        last_roll = user['last_roll_time']
+    for user in users_on_cooldown:
         next_roll = user['next_roll_time']
-
-        # Get their last fruit
-        rolls = get_user_rolls(user['user_id'])
-        last_fruit = rolls[0]['fruit'] if rolls else "None"
+        last_fruit = user.get('last_fruit') or "None"
 
         next_roll_str = f"<t:{int(next_roll.timestamp())}:R>" if next_roll else "No upcoming roll"
         notif_status = "🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"
@@ -2169,7 +2237,7 @@ async def handle_stats(request):
     html = STATS_PAGE.format(
         uptime=uptime,
         total_rolls=stats['total_rolls'],
-        active_users=len(users),
+        active_users=active_users_count,
         guilds_count=stats['guilds_count'],
         users_list=users_html,
         rarity_data=json.dumps(rarity_data),
