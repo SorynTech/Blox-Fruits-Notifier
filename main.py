@@ -410,16 +410,22 @@ def log_roll(user_id: int, username: str, fruit_name: str):
             return_db_connection(conn)
 
 
-def get_user_rolls(user_id: int) -> List[Dict]:
-    """Get all rolls for a user"""
+def get_user_rolls(user_id: int, limit: Optional[int] = None) -> List[Dict]:
+    """Get rolls for a user with optional limit"""
     try:
-        logger.debug(f"📊 Fetching roll history for user ID: {user_id}")
+        logger.debug(f"📊 Fetching roll history for user ID: {user_id} (limit: {limit})")
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute('''SELECT fruit_name, rolled_at
-                       FROM rolls
-                       WHERE user_id = %s
-                       ORDER BY rolled_at DESC''', (user_id,))
+
+        query = '''SELECT fruit_name, rolled_at
+                   FROM rolls
+                   WHERE user_id = %s
+                   ORDER BY rolled_at DESC'''
+
+        if limit:
+            query += f' LIMIT {limit}'
+
+        cur.execute(query, (user_id,))
         rows = cur.fetchall()
         cur.close()
         return_db_connection(conn)
@@ -452,6 +458,57 @@ def get_all_users() -> List[Dict]:
         return [dict(row) for row in rows]
     except Exception as e:
         logger.error(f"❌ Error in get_all_users: {e}")
+        return []
+
+
+def get_active_user_count() -> int:
+    """Get count of all users in database (O(1) instead of O(N))"""
+    try:
+        logger.debug("👥 Fetching user count")
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT COUNT(*) FROM users')
+        count = cur.fetchone()[0]
+        cur.close()
+        return_db_connection(conn)
+        return count
+    except Exception as e:
+        logger.error(f"❌ Error in get_active_user_count: {e}")
+        return 0
+
+
+def get_all_users_with_last_roll() -> List[Dict]:
+    """Get all users with their most recent roll in a single query (resolves N+1)"""
+    try:
+        logger.debug("👥 Fetching all users and their latest rolls")
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        # Use DISTINCT ON to get only the most recent roll per user
+        cur.execute('''
+            SELECT u.user_id,
+                   u.username,
+                   u.total_rolls,
+                   u.last_roll_time,
+                   u.next_roll_time,
+                   u.notifications_enabled,
+                   r.fruit_name as last_fruit
+            FROM users u
+            LEFT JOIN (
+                SELECT DISTINCT ON (user_id) user_id, fruit_name, rolled_at
+                FROM rolls
+                ORDER BY user_id, rolled_at DESC
+            ) r ON u.user_id = r.user_id
+        ''')
+
+        rows = cur.fetchall()
+        cur.close()
+        return_db_connection(conn)
+
+        logger.debug(f"✅ Fetched {len(rows)} users with roll data")
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"❌ Error in get_all_users_with_last_roll: {e}")
         return []
 
 
@@ -1048,7 +1105,8 @@ async def on_ready():
     logger.info("=" * 80)
 
     # Update active users count
-    stats['active_users'] = len(get_all_users())
+    # Optimization: Use COUNT(*) instead of fetching all users
+    stats['active_users'] = get_active_user_count()
     logger.info(f"👥 Active users in database: {stats['active_users']}")
 
     # Sync slash commands
@@ -2084,7 +2142,8 @@ async def handle_stats(request):
         uptime = f"{days}d {hours}h {minutes}m"
 
     # Get all users sorted by next roll time
-    users = get_all_users()
+    # Optimization: Use get_all_users_with_last_roll to fetch all data in ONE query instead of N+1
+    users = get_all_users_with_last_roll()
     users_sorted = sorted(
         [u for u in users if u['next_roll_time']],
         key=lambda x: x['next_roll_time']
@@ -2096,9 +2155,8 @@ async def handle_stats(request):
         last_roll = user['last_roll_time']
         next_roll = user['next_roll_time']
 
-        # Get their last fruit
-        rolls = get_user_rolls(user['user_id'])
-        last_fruit = rolls[0]['fruit'] if rolls else "None"
+        # Get their last fruit from the joined query results
+        last_fruit = user.get('last_fruit') or "None"
 
         next_roll_str = f"<t:{int(next_roll.timestamp())}:R>" if next_roll else "No upcoming roll"
         notif_status = "🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"
