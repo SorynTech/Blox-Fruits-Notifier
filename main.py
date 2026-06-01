@@ -449,9 +449,38 @@ def get_all_users() -> List[Dict]:
         return_db_connection(conn)
 
         logger.debug(f"✅ Fetched {len(rows)} users")
-        return [dict(row) for row in rows]
+        return rows
     except Exception as e:
         logger.error(f"❌ Error in get_all_users: {e}")
+        return []
+
+
+def get_all_users_with_last_fruit() -> List[Dict]:
+    """Get all users and their most recently rolled fruit in one query"""
+    try:
+        logger.debug("👥 Fetching all users with last fruit from database")
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        # ⚡ Optimization: Use DISTINCT ON to get only the latest roll per user in one JOIN
+        cur.execute('''SELECT DISTINCT ON (u.user_id)
+                              u.user_id,
+                              u.username,
+                              u.total_rolls,
+                              u.last_roll_time,
+                              u.next_roll_time,
+                              u.notifications_enabled,
+                              r.fruit_name as last_fruit
+                       FROM users u
+                       LEFT JOIN rolls r ON u.user_id = r.user_id
+                       ORDER BY u.user_id, r.rolled_at DESC''')
+        rows = cur.fetchall()
+        cur.close()
+        return_db_connection(conn)
+
+        logger.debug(f"✅ Fetched {len(rows)} users with last fruit data")
+        return rows
+    except Exception as e:
+        logger.error(f"❌ Error in get_all_users_with_last_fruit: {e}")
         return []
 
 
@@ -2083,8 +2112,9 @@ async def handle_stats(request):
         minutes, _ = divmod(remainder, 60)
         uptime = f"{days}d {hours}h {minutes}m"
 
-    # Get all users sorted by next roll time
-    users = get_all_users()
+    # Get all users with their last fruit, sorted by next roll time
+    # ⚡ Optimization: Using get_all_users_with_last_fruit() to avoid N+1 queries
+    users = get_all_users_with_last_fruit()
     users_sorted = sorted(
         [u for u in users if u['next_roll_time']],
         key=lambda x: x['next_roll_time']
@@ -2096,9 +2126,8 @@ async def handle_stats(request):
         last_roll = user['last_roll_time']
         next_roll = user['next_roll_time']
 
-        # Get their last fruit
-        rolls = get_user_rolls(user['user_id'])
-        last_fruit = rolls[0]['fruit'] if rolls else "None"
+        # Get their last fruit from the pre-fetched data
+        last_fruit = user.get('last_fruit') or "None"
 
         next_roll_str = f"<t:{int(next_roll.timestamp())}:R>" if next_roll else "No upcoming roll"
         notif_status = "🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"
