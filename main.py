@@ -455,6 +455,65 @@ def get_all_users() -> List[Dict]:
         return []
 
 
+def get_eligible_notification_users() -> List[Dict]:
+    """Get only users who have notifications enabled and are due for a roll reminder"""
+    try:
+        now = datetime.now(timezone.utc)
+        logger.debug(f"👥 Fetching eligible notification users (now: {now})")
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute('''SELECT user_id,
+                              username,
+                              total_rolls,
+                              last_roll_time,
+                              next_roll_time,
+                              notifications_enabled
+                       FROM users
+                       WHERE notifications_enabled = TRUE
+                         AND next_roll_time IS NOT NULL
+                         AND next_roll_time <= %s''', (now,))
+        rows = cur.fetchall()
+        cur.close()
+        return_db_connection(conn)
+
+        logger.debug(f"✅ Found {len(rows)} users eligible for notification")
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"❌ Error in get_eligible_notification_users: {e}")
+        return []
+
+
+def get_users_with_last_roll() -> List[Dict]:
+    """Get all users with their most recent fruit roll in a single query (O(1))"""
+    try:
+        logger.debug("👥 Fetching users with last roll from database")
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        # Use DISTINCT ON to get the latest roll for each user efficiently
+        cur.execute('''
+            SELECT DISTINCT ON (u.user_id)
+                u.user_id,
+                u.username,
+                u.total_rolls,
+                u.last_roll_time,
+                u.next_roll_time,
+                u.notifications_enabled,
+                r.fruit_name as last_fruit
+            FROM users u
+            LEFT JOIN rolls r ON u.user_id = r.user_id
+            ORDER BY u.user_id, r.rolled_at DESC
+        ''')
+        rows = cur.fetchall()
+        cur.close()
+        return_db_connection(conn)
+
+        logger.debug(f"✅ Fetched {len(rows)} users with roll data")
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"❌ Error in get_users_with_last_roll: {e}")
+        return []
+
+
 def toggle_notifications(user_id: int, enabled: bool):
     """Toggle notifications for a user"""
     try:
@@ -1134,8 +1193,11 @@ async def notify_initial_users():
 async def notification_checker():
     """Check for users who need roll reminders"""
     logger.debug("⏰ Notification checker running...")
-    now = datetime.now(timezone.utc)
-    users = get_all_users()
+    # Get only users who are actually due for a reminder
+    users = get_eligible_notification_users()
+
+    if not users:
+        return
 
     # Get notification channel
     channel = bot.get_channel(NOTIFICATION_CHANNEL_ID)
@@ -1144,11 +1206,12 @@ async def notification_checker():
         return
 
     notifications_sent = 0
-    for user_data in users:
-        if not user_data['notifications_enabled']:
-            continue
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
 
-        if user_data['next_roll_time'] and user_data['next_roll_time'] <= now:
+        for user_data in users:
             try:
                 display_name = get_display_name(user_data['user_id'], user_data['username'])
                 logger.info(f"🔔 Sending roll reminder to {display_name} ({user_data['username']}, ID: {user_data['user_id']})")
@@ -1185,20 +1248,22 @@ async def notification_checker():
                 notifications_sent += 1
 
                 # Clear next_roll_time so we don't spam
-                try:
-                    conn = get_db_connection()
-                    cur = conn.cursor()
-                    cur.execute('UPDATE users SET next_roll_time = NULL WHERE user_id = %s',
-                                (user_data['user_id'],))
-                    conn.commit()
-                    cur.close()
-                    return_db_connection(conn)
-                except Exception as e:
-                    logger.error(f"❌ Error updating next_roll_time: {e}")
+                cur.execute('UPDATE users SET next_roll_time = NULL WHERE user_id = %s',
+                            (user_data['user_id'],))
+                conn.commit()
 
                 logger.info(f"✅ Sent roll reminder to {display_name}")
             except Exception as e:
                 logger.error(f"❌ Failed to send reminder to {user_data['user_id']}: {e}")
+                if conn:
+                    conn.rollback()
+
+        cur.close()
+        return_db_connection(conn)
+    except Exception as e:
+        logger.error(f"❌ Database error in notification_checker: {e}")
+        if conn:
+            return_db_connection(conn)
     
     if notifications_sent > 0:
         logger.info(f"📬 Sent {notifications_sent} roll reminder(s) this cycle")
@@ -2083,8 +2148,8 @@ async def handle_stats(request):
         minutes, _ = divmod(remainder, 60)
         uptime = f"{days}d {hours}h {minutes}m"
 
-    # Get all users sorted by next roll time
-    users = get_all_users()
+    # Get all users with their last roll sorted by next roll time
+    users = get_users_with_last_roll()
     users_sorted = sorted(
         [u for u in users if u['next_roll_time']],
         key=lambda x: x['next_roll_time']
@@ -2096,9 +2161,8 @@ async def handle_stats(request):
         last_roll = user['last_roll_time']
         next_roll = user['next_roll_time']
 
-        # Get their last fruit
-        rolls = get_user_rolls(user['user_id'])
-        last_fruit = rolls[0]['fruit'] if rolls else "None"
+        # Get their last fruit from the joined query data
+        last_fruit = user.get('last_fruit') or "None"
 
         next_roll_str = f"<t:{int(next_roll.timestamp())}:R>" if next_roll else "No upcoming roll"
         notif_status = "🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"
