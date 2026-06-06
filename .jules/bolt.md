@@ -1,0 +1,3 @@
+## 2026-06-06 - [Optimized Dashboard N+1 Query]
+**Learning:** The dashboard statistics page suffered from an N+1 query pattern where it fetched all users and then queried the 'rolls' table for each user to find their latest fruit. PostgreSQL's `DISTINCT ON (user_id)` clause is a powerful tool for fetching the latest record per group in a single query.
+**Action:** Use `DISTINCT ON` combined with `LEFT JOIN` to fetch related "latest" records in a single query instead of looping in Python. Always include a `finally` block to ensure database connections are returned to the pool in case of exceptions.
