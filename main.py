@@ -455,6 +455,64 @@ def get_all_users() -> List[Dict]:
         return []
 
 
+def get_user_count() -> int:
+    """Get total number of users (O(1) database operation)"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT COUNT(*) FROM users')
+        count = cur.fetchone()[0]
+        cur.close()
+        return_db_connection(conn)
+        return count
+    except Exception as e:
+        logger.error(f"❌ Error in get_user_count: {e}")
+        return 0
+
+
+def get_users_with_last_roll() -> List[Dict]:
+    """
+    Get users with their most recent roll in a single optimized query.
+    Only includes users with an upcoming roll (next_roll_time is not NULL).
+    Returns O(1) database performance instead of O(N) N+1 queries.
+    """
+    try:
+        logger.debug("📊 Fetching users with their last roll (optimized)")
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        # Optimized query using DISTINCT ON to get the latest roll per user
+        # combined with a LEFT JOIN to include user data.
+        cur.execute('''
+            SELECT
+                u.user_id,
+                u.username,
+                u.total_rolls,
+                u.next_roll_time,
+                u.notifications_enabled,
+                r.fruit_name as last_fruit,
+                r.rolled_at as last_roll_time
+            FROM users u
+            LEFT JOIN (
+                SELECT DISTINCT ON (user_id) user_id, fruit_name, rolled_at
+                FROM rolls
+                ORDER BY user_id, rolled_at DESC
+            ) r ON u.user_id = r.user_id
+            WHERE u.next_roll_time IS NOT NULL
+            ORDER BY u.next_roll_time ASC
+        ''')
+
+        rows = cur.fetchall()
+        cur.close()
+        return_db_connection(conn)
+
+        logger.debug(f"✅ Fetched {len(rows)} users with roll data")
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"❌ Error in get_users_with_last_roll: {e}")
+        return []
+
+
 def toggle_notifications(user_id: int, enabled: bool):
     """Toggle notifications for a user"""
     try:
@@ -1048,7 +1106,7 @@ async def on_ready():
     logger.info("=" * 80)
 
     # Update active users count
-    stats['active_users'] = len(get_all_users())
+    stats['active_users'] = get_user_count()
     logger.info(f"👥 Active users in database: {stats['active_users']}")
 
     # Sync slash commands
@@ -2083,22 +2141,15 @@ async def handle_stats(request):
         minutes, _ = divmod(remainder, 60)
         uptime = f"{days}d {hours}h {minutes}m"
 
-    # Get all users sorted by next roll time
-    users = get_all_users()
-    users_sorted = sorted(
-        [u for u in users if u['next_roll_time']],
-        key=lambda x: x['next_roll_time']
-    )
+    # Get all users with their last roll (O(1) query)
+    users_sorted = get_users_with_last_roll()
 
     # Build users list HTML
     users_html = ""
     for user in users_sorted:
-        last_roll = user['last_roll_time']
         next_roll = user['next_roll_time']
-
-        # Get their last fruit
-        rolls = get_user_rolls(user['user_id'])
-        last_fruit = rolls[0]['fruit'] if rolls else "None"
+        last_roll = user.get('last_roll_time')
+        last_fruit = user.get('last_fruit') or "None"
 
         next_roll_str = f"<t:{int(next_roll.timestamp())}:R>" if next_roll else "No upcoming roll"
         notif_status = "🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"
@@ -2169,7 +2220,7 @@ async def handle_stats(request):
     html = STATS_PAGE.format(
         uptime=uptime,
         total_rolls=stats['total_rolls'],
-        active_users=len(users),
+        active_users=get_user_count(),
         guilds_count=stats['guilds_count'],
         users_list=users_html,
         rarity_data=json.dumps(rarity_data),
