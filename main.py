@@ -455,6 +455,47 @@ def get_all_users() -> List[Dict]:
         return []
 
 
+def get_users_with_last_roll() -> List[Dict]:
+    """
+    Get all users and their most recent roll in a single query.
+    Optimizes the stats page from O(N) to O(1) database queries.
+    """
+    try:
+        logger.debug("👥 Fetching users with their last roll (optimized)")
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        # Use DISTINCT ON to get the latest roll for each user efficiently
+        cur.execute('''
+            SELECT
+                u.user_id,
+                u.username,
+                u.total_rolls,
+                u.last_roll_time,
+                u.next_roll_time,
+                u.notifications_enabled,
+                lr.fruit_name as last_fruit
+            FROM users u
+            LEFT JOIN (
+                SELECT DISTINCT ON (user_id)
+                    user_id,
+                    fruit_name
+                FROM rolls
+                ORDER BY user_id, rolled_at DESC
+            ) lr ON u.user_id = lr.user_id
+        ''')
+
+        rows = cur.fetchall()
+        cur.close()
+        return_db_connection(conn)
+
+        logger.debug(f"✅ Fetched {len(rows)} users with roll data")
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"❌ Error in get_users_with_last_roll: {e}")
+        return []
+
+
 def toggle_notifications(user_id: int, enabled: bool):
     """Toggle notifications for a user"""
     try:
@@ -2083,27 +2124,25 @@ async def handle_stats(request):
         minutes, _ = divmod(remainder, 60)
         uptime = f"{days}d {hours}h {minutes}m"
 
-    # Get all users sorted by next roll time
-    users = get_all_users()
+    # Get users with their last roll in a single query (O(1) optimization)
+    users_with_data = get_users_with_last_roll()
+
+    # Sort users with upcoming rolls by time
     users_sorted = sorted(
-        [u for u in users if u['next_roll_time']],
+        [u for u in users_with_data if u['next_roll_time']],
         key=lambda x: x['next_roll_time']
     )
 
     # Build users list HTML
-    users_html = ""
+    users_html_list = []
     for user in users_sorted:
-        last_roll = user['last_roll_time']
         next_roll = user['next_roll_time']
-
-        # Get their last fruit
-        rolls = get_user_rolls(user['user_id'])
-        last_fruit = rolls[0]['fruit'] if rolls else "None"
+        last_fruit = user.get('last_fruit') or "None"
 
         next_roll_str = f"<t:{int(next_roll.timestamp())}:R>" if next_roll else "No upcoming roll"
         notif_status = "🔔 Enabled" if user['notifications_enabled'] else "🔕 Disabled"
 
-        users_html += f"""
+        users_html_list.append(f"""
         <div class="user-item">
             <div class="user-info">
                 <div class="user-name">{user['username']}</div>
@@ -2116,8 +2155,9 @@ async def handle_stats(request):
                 <div>{next_roll_str}</div>
             </div>
         </div>
-        """
+        """)
 
+    users_html = "".join(users_html_list)
     if not users_html:
         users_html = "<p style='text-align: center; opacity: 0.7;'>No users have logged rolls yet</p>"
 
@@ -2169,7 +2209,7 @@ async def handle_stats(request):
     html = STATS_PAGE.format(
         uptime=uptime,
         total_rolls=stats['total_rolls'],
-        active_users=len(users),
+        active_users=len(users_with_data),
         guilds_count=stats['guilds_count'],
         users_list=users_html,
         rarity_data=json.dumps(rarity_data),
