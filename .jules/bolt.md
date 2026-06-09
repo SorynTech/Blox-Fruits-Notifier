@@ -1,0 +1,3 @@
+## 2026-06-09 - [Optimizing Dashboard and Background Workers]
+**Learning:** The dashboard had a classic N+1 query pattern where it fetched all users and then queried the `rolls` table for each user's latest entry. Additionally, the background notification worker was fetching all user records and filtering them in Python memory.
+**Action:** Use PostgreSQL's `DISTINCT ON` to consolidate per-user latest records into a single query for the dashboard. Move filtering logic (e.g., `notifications_enabled = TRUE`) directly into SQL `WHERE` clauses for background tasks to minimize data transfer and processing overhead.
